@@ -1,0 +1,17 @@
+# Scratch clone of the HKUDS/nanobot fork used during development (not vendored here).
+_explore/
+
+# Python
+**/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Background task / tool output
+*.output
+
+# Secrets (only *.example.* is committed)
+*.secret.yaml
+.env

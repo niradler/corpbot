@@ -1,0 +1,168 @@
+diff --git a/nanobot/agent/loop.py b/nanobot/agent/loop.py
+index 1594238..1481f4a 100644
+--- a/nanobot/agent/loop.py
++++ b/nanobot/agent/loop.py
+@@ -504,6 +504,11 @@ class AgentLoop:
+     ) -> None:
+         """Update context for all tools that need routing info."""
+         from nanobot.agent.tools.context import ContextAware
++        from nanobot.security.sandbox_routing import apply_sandbox_id
++
++        # corpbot: route boxy MCP calls to this user's sandbox. chat_id is the trusted
++        # Slack user id from channel context — never model/tool-supplied.
++        apply_sandbox_id(chat_id)
+ 
+         if session_key is not None:
+             effective_key = session_key
+diff --git a/nanobot/agent/tools/filesystem.py b/nanobot/agent/tools/filesystem.py
+index 6e43949..b29a28d 100644
+--- a/nanobot/agent/tools/filesystem.py
++++ b/nanobot/agent/tools/filesystem.py
+@@ -10,6 +10,7 @@ from typing import Any
+ from nanobot.agent.tools.base import Tool, tool_parameters
+ from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
+ from nanobot.agent.tools.path_utils import resolve_workspace_path
++from nanobot.config.schema import Base
+ from nanobot.security.workspace_access import current_tool_workspace
+ from nanobot.agent.tools.schema import (
+     BooleanSchema,
+@@ -20,9 +21,27 @@ from nanobot.agent.tools.schema import (
+ from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
+ 
+ 
++class FileToolsConfig(Base):
++    """Filesystem tools configuration."""
++
++    # corpbot: built-in file tools are OFF by default — boxy is the only file surface.
++    # Gates every _FsTool subclass: read/write/edit/list, apply_patch, and find/grep.
++    enable: bool = False
++
++
+ class _FsTool(Tool):
+     """Shared base for filesystem tools — common init and path resolution."""
+ 
++    config_key = "file"
++
++    @classmethod
++    def config_cls(cls):
++        return FileToolsConfig
++
++    @classmethod
++    def enabled(cls, ctx: Any) -> bool:
++        return ctx.config.file.enable
++
+     def __init__(
+         self,
+         workspace: Path | None = None,
+diff --git a/nanobot/agent/tools/mcp.py b/nanobot/agent/tools/mcp.py
+index e26a434..71b3682 100644
+--- a/nanobot/agent/tools/mcp.py
++++ b/nanobot/agent/tools/mcp.py
+@@ -13,6 +13,7 @@ import httpx
+ from loguru import logger
+ 
+ from nanobot.agent.tools.base import Tool
++from nanobot.agent.tools.mcp_sandbox import SandboxToolInvoker
+ from nanobot.agent.tools.registry import ToolRegistry
+ from nanobot.bus.events import (
+     INBOUND_META_RUNTIME_CONTROL,
+@@ -179,8 +180,12 @@ class MCPToolWrapper(Tool):
+ 
+     _plugin_discoverable = False
+ 
+-    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
++    def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30,
++                 invoker: "SandboxToolInvoker | None" = None):
+         self._session = session
++        # corpbot: when set, route each call through a fresh per-user sandbox connection
++        # instead of the shared session (see mcp_sandbox.SandboxToolInvoker).
++        self._invoker = invoker
+         self._original_name = tool_def.name
+         self._name = _sanitize_name(f"mcp_{server_name}_{tool_def.name}")
+         self._description = tool_def.description or tool_def.name
+@@ -205,10 +210,11 @@ class MCPToolWrapper(Tool):
+ 
+         for attempt in range(2):  # At most 1 retry
+             try:
+-                result = await asyncio.wait_for(
+-                    self._session.call_tool(self._original_name, arguments=kwargs),
+-                    timeout=self._tool_timeout,
+-                )
++                if self._invoker is not None:
++                    call = self._invoker.call_tool(self._original_name, kwargs)
++                else:
++                    call = self._session.call_tool(self._original_name, arguments=kwargs)
++                result = await asyncio.wait_for(call, timeout=self._tool_timeout)
+             except asyncio.TimeoutError:
+                 logger.warning(
+                     "MCP tool '{}' timed out after {}s", self._name, self._tool_timeout
+@@ -565,6 +571,14 @@ async def connect_mcp_servers(
+             await session.initialize()
+ 
+             tools = await session.list_tools()
++            # corpbot: per-user sandbox routing. Tools are discovered on the shared session
++            # (base headers), but each call is routed through a fresh per-user connection.
++            sandbox_invoker = (
++                SandboxToolInvoker(cfg.url, dict(cfg.headers or {}), cfg.tool_timeout)
++                if getattr(cfg, "inject_sandbox_id", False)
++                and transport_type in ("streamableHttp", "sse")
++                else None
++            )
+             enabled_tools = set(cfg.enabled_tools)
+             allow_all_tools = "*" in enabled_tools
+             registered_count = 0
+@@ -584,7 +598,9 @@ async def connect_mcp_servers(
+                         name,
+                     )
+                     continue
+-                wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
++                wrapper = MCPToolWrapper(
++                    session, name, tool_def, tool_timeout=cfg.tool_timeout, invoker=sandbox_invoker
++                )
+                 registry.register(wrapper)
+                 logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
+                 registered_count += 1
+diff --git a/nanobot/config/schema.py b/nanobot/config/schema.py
+index 2a89d04..f499dae 100644
+--- a/nanobot/config/schema.py
++++ b/nanobot/config/schema.py
+@@ -12,6 +12,7 @@ from nanobot.cron.types import CronSchedule
+ 
+ if TYPE_CHECKING:
+     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
++    from nanobot.agent.tools.filesystem import FileToolsConfig
+     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
+     from nanobot.agent.tools.self import MyToolConfig
+     from nanobot.agent.tools.shell import ExecToolConfig
+@@ -273,6 +274,7 @@ class MCPServerConfig(Base):
+     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
+     tool_timeout: int = 30  # seconds before a tool call is cancelled
+     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
++    inject_sandbox_id: bool = False  # corpbot: stamp X-Sandbox-Id (from trusted chat id, per message) on each request for per-user boxy sandbox routing
+ 
+ 
+ def _lazy_default(module_path: str, class_name: str) -> Any:
+@@ -292,6 +294,7 @@ class ToolsConfig(Base):
+ 
+     web: WebToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig"))
+     exec: ExecToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig"))
++    file: FileToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.filesystem", "FileToolsConfig"))
+     cli_apps: CliAppsToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.cli_apps", "CliAppsToolConfig"))
+     my: MyToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.self", "MyToolConfig"))
+     image_generation: ImageGenerationToolConfig = Field(
+@@ -494,6 +497,7 @@ def _resolve_tool_config_refs() -> None:
+     import sys
+ 
+     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
++    from nanobot.agent.tools.filesystem import FileToolsConfig
+     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
+     from nanobot.agent.tools.self import MyToolConfig
+     from nanobot.agent.tools.shell import ExecToolConfig
+@@ -502,6 +506,7 @@ def _resolve_tool_config_refs() -> None:
+     # Re-export into this module's namespace
+     mod = sys.modules[__name__]
+     mod.ExecToolConfig = ExecToolConfig  # type: ignore[attr-defined]
++    mod.FileToolsConfig = FileToolsConfig  # type: ignore[attr-defined]
+     mod.CliAppsToolConfig = CliAppsToolConfig  # type: ignore[attr-defined]
+     mod.WebToolsConfig = WebToolsConfig  # type: ignore[attr-defined]
+     mod.WebSearchConfig = WebSearchConfig  # type: ignore[attr-defined]

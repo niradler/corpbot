@@ -1,0 +1,26 @@
+# Per-user sandbox template (boxy build task B2). boxy lazily provisions a sandbox from this
+# on the first unknown X-Sandbox-Id. SCAFFOLD — set <bucket>.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: corpbot-sandbox-template
+  namespace: boxy
+  labels:
+    app.kubernetes.io/part-of: corpbot
+data:
+  template.json: |
+    {
+      "ttlSeconds": 3600,
+      "network": { "enabled": true, "allowInternetAccess": false },
+      "allowedBinaries": ["bash", "python3", "node", "git"],
+      "vm": {
+        "memoryMb": 512,
+        "rlimits": [
+          { "resource": "nproc",  "soft": 256 },
+          { "resource": "nofile", "soft": 1024 }
+        ]
+      },
+      "setupScript": "/opt/boxy/scripts/s3-restore.sh",
+      "teardownScript": "/opt/boxy/scripts/s3-sync.sh",
+      "scriptEnv": { "S3_BUCKET": "<bucket>" }
+    }

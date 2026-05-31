@@ -1,0 +1,32 @@
+{
+  "_comment": "corpbot nanobot config — mount at ~/.nanobot/config.json. Env vars (${...}) substituted at deploy time. SCAFFOLD: fill in provider + allowFrom.",
+
+  "provider": {
+    "_comment": "TODO: set your LLM provider/model. Key comes from a secret.",
+    "name": "anthropic",
+    "apiKey": "${ANTHROPIC_API_KEY}"
+  },
+
+  "tools": {
+    "exec": { "enable": false },
+    "web":  { "enable": false },
+    "file": { "enable": false },
+
+    "mcpServers": {
+      "boxy": {
+        "url": "http://boxy-router.boxy.svc.cluster.local:8080/mcp",
+        "headers": { "Authorization": "Bearer ${BOXY_ROUTER_TOKEN}" },
+        "injectSandboxId": true,
+        "toolTimeout": 120
+      }
+    }
+  },
+
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "token": "${SLACK_BOT_TOKEN}",
+      "allowFrom": ["<COMPANY_SLACK_USER_IDS>"]
+    }
+  }
+}
