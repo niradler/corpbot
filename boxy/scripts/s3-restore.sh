@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEFERRED (v1): S3 /workspace persistence is a later milestone and is NOT wired up yet.
+# Reference script for the deferred B3 milestone (a derived controller image), not used in v1.
+#
 # boxy setupScript — restore the per-user /workspace from S3 on sandbox provision.
 #
 # SCAFFOLD: review before use. Runs on the boxy CONTROLLER (has network + S3 creds via

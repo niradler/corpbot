@@ -3,7 +3,8 @@
 A self-hosted, **single-tenant** AI agent for one company. Many employees talk to it
 in Slack; **each user gets their own isolated execution sandbox**. The model has no local
 tools — every action runs inside a per-user [nsjail](https://github.com/google/nsjail)
-sandbox on Kubernetes, with a sliding 1-hour TTL and S3-backed `/workspace` persistence.
+sandbox on Kubernetes, with a sliding 1-hour TTL and a per-sandbox `/workspace`.
+(S3-backed `/workspace` persistence is **deferred** to a later milestone — see the docs.)
 
 > **Status — verified live.** The per-user routing has been proven end-to-end against **real
 > boxy on a local kind cluster**: two Slack users each ran `bash` in their **own** nsjail
@@ -24,7 +25,7 @@ sandbox on Kubernetes, with a sliding 1-hour TTL and S3-backed `/workspace` pers
 |------|------|
 | [`docs/architecture.md`](./docs/architecture.md) | Flow, sandbox lifecycle, identity/security model, limits |
 | [`nanobot/`](./nanobot) | Fork guidance + **`overlay/`** (new files), **`patches/upstream.diff`** (edits), **`tests/`**, **`scripts/`** (demo + live driver) |
-| [`boxy/`](./boxy) | Extension plan + **`patches/b2-router-session-routing.diff`** + S3 hook scripts |
+| [`boxy/`](./boxy) | How corpbot consumes boxy (pinned published dependency) + B2 stopgap diff + deferred S3 hook scripts |
 | [`agent-deploy/`](./agent-deploy) | Helm values, nanobot config, k8s manifests, secrets template |
 
 See [`nanobot/README.md`](./nanobot/README.md) to apply the patches to your HKUDS fork and run
@@ -37,7 +38,7 @@ Slack message
   → one nanobot process (asserts the Slack user id)
     → boxy MCP  (X-Sandbox-Id = that user)
       → per-user nsjail sandbox on k8s
-         (sliding 1h TTL, S3-backed /workspace persistence)
+         (sliding 1h TTL, ephemeral per-sandbox /workspace; S3 persistence deferred)
 ```
 
 ## Architecture
@@ -57,29 +58,31 @@ Slack message
                 │          ▼                  │  boxy-operator/controller │  │
                 │     LLM provider            │  per-user nsjail sandbox  │  │
                 │     (Anthropic/...)         │  /workspace (no internet) │  │
-                │                             └────────────┬─────────────┘  │
-                │                                          │ setup/teardown  │
-                └──────────────────────────────────────────┼────────────────┘
-                                                            ▼
-                                                   S3: s3://<bucket>/u-<user>/
+                │                             └──────────────────────────┘  │
+                │                                                           │
+                └───────────────────────────────────────────────────────────┘
+
+# Deferred (later milestone): setup/teardown S3 sync of /workspace
+#   boxy-controller ──► S3: s3://<bucket>/u-<user>/
 ```
 
 The model acts **only** through boxy. nanobot's own shell/web/file tools are disabled.
 The LLM API calls leave from the nanobot process (which has egress); the sandbox jail
 itself has **no internet**.
 
-## Components (three repos)
+## Components
 
 | Dir | What it is | Language | How it ships |
 |-----|-----------|----------|--------------|
-| [`nanobot/`](./nanobot) | Fork of [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — the agent brain + Slack ingress | Python | Container image, config at `~/.nanobot/config.json` |
-| [`boxy/`](./boxy) | Fork/branch of [niradler/boxy](https://github.com/niradler/boxy) — per-user sandbox runtime | Go (k8s) | Helm chart `oci://ghcr.io/niradler/charts/boxy`, pinned by version |
-| [`agent-deploy/`](./agent-deploy) | Thin deploy repo that wires the two together | YAML / Helm | Helm + k8s manifests |
+| [`nanobot/`](./nanobot) | Fork of [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — the agent brain + Slack ingress (corpbot-authored patches/plugin) | Python | Container image, config at `~/.nanobot/config.json` |
+| [`boxy/`](./boxy) | [niradler/boxy](https://github.com/niradler/boxy) — per-user sandbox runtime, consumed as an **external pinned dependency** (not a corpbot fork) | Go (k8s) | Published Helm chart `oci://ghcr.io/niradler/charts/boxy` + GHCR images, pinned by version |
+| [`agent-deploy/`](./agent-deploy) | Thin deploy repo that wires the two together (corpbot-authored) | YAML / Helm | Helm + k8s manifests |
 
-> **These are three separate repos**, not one. They live here as sibling directories for
-> convenience during bootstrap. `agent-deploy/` references boxy as a **deployed service**
-> (Helm chart + HTTP/MCP endpoint) — **never** as a git submodule of boxy source, and boxy
-> is **never** imported as a library into nanobot.
+> **Only nanobot (patches/plugin) and agent-deploy are corpbot-authored.** boxy is an
+> **external dependency** consumed via its **published** Helm chart + GHCR images, pinned by
+> version — **not** a corpbot fork and **not** built from source here. `agent-deploy/`
+> references boxy as a **deployed service** (Helm chart + HTTP/MCP endpoint) — **never** as a
+> git submodule of boxy source, and boxy is **never** imported as a library into nanobot.
 
 ## Deploy order (Helm)
 
@@ -102,11 +105,15 @@ Full deploy steps live in [`agent-deploy/README.md`](./agent-deploy/README.md).
   nanobot process, outside the jail.
 - **boxy exec output caps at 6 MB** (`BOXY_MAX_OUTPUT_BYTES`) and truncates with a `200 OK` —
   use the stream endpoint or file tools for large output.
-- **Pin boxy** by chart/image version; keep the nanobot fork's upstream remote to HKUDS for
-  updates.
+- **Pin boxy** by published chart/image version (consume, don't fork — pin a release that
+  includes [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)); keep the nanobot fork's
+  upstream remote to HKUDS for updates.
 
 ## Out of scope (v1)
 
+- **S3 `/workspace` persistence is deferred.** v1 runs on boxy's ephemeral, per-sandbox
+  `/workspace`; S3 backup/restore is a **later milestone** (a derived controller image, not a
+  boxy fork). See [`docs/architecture.md`](./docs/architecture.md).
 - **No MCP gateway (Obot).** Only needed later for onboarding third-party MCP servers that
   require per-user OAuth. Not in v1.
 - **No multi-tenancy.** This is for one company with trusted employees.

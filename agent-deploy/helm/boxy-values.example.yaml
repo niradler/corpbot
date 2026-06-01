@@ -1,10 +1,16 @@
-# Values for the pinned boxy chart: oci://ghcr.io/niradler/charts/boxy
+# Values for the PINNED PUBLISHED boxy chart: oci://ghcr.io/niradler/charts/boxy
+# boxy is an external dependency — consume the published chart + GHCR images, do NOT fork or
+# build from source. Pin a release that includes per-user routing (niradler/boxy PR #5).
 # SCAFFOLD — confirm key names against the chart's values.yaml for the pinned version.
 # Install with:  helm install boxy oci://ghcr.io/niradler/charts/boxy \
-#                  --version <PINNED_CHART_VERSION> -n boxy -f boxy-values.example.yaml
+#                  --version <PINNED_CHART_VERSION ≥ release with PR #5> \
+#                  -n boxy -f boxy-values.example.yaml
+#
+# DEFERRED (v1): S3 /workspace persistence is a later milestone. v1 uses the upstream
+# controller image with an ephemeral, per-sandbox /workspace. The controller IRSA + scripts
+# block below is for the deferred S3 milestone (a derived controller image) and is unused in v1.
 
-# --- image pinning -----------------------------------------------------------
-# Pin the controller image that pre-bakes AWS CLI + allowedBinaries (Dockerfile.controller.dev).
+# --- image pinning (published GHCR images) -----------------------------------
 image:
   controller:
     repository: ghcr.io/niradler/boxy-controller   # TODO confirm
@@ -34,17 +40,19 @@ router:
 defaultSandbox:
   enabled: false   # TODO confirm exact chart key (maps to DefaultSandboxEnabled / DefaultSandboxConfig)
 
-# --- controller / S3 ---------------------------------------------------------
-controller:
-  serviceAccount:
-    # Prefer IRSA: annotate the SA with the IAM role that grants s3:GetObject/PutObject.
-    create: true
-    annotations:
-      eks.amazonaws.com/role-arn: "<IRSA_ROLE_ARN>"   # TODO
-  scripts:
-    # Mounted at /opt/boxy/scripts (referenced by the sandbox template setup/teardown).
-    # Baked into the controller image per boxy/README.md task C.
-    path: /opt/boxy/scripts
+# --- controller / S3 --- DEFERRED (later milestone; unused in v1) ------------
+# S3 /workspace persistence is deferred. Leave this commented out for v1; enable it only when
+# the S3 milestone lands (with a derived controller image that bakes the AWS CLI + hook scripts).
+# controller:
+#   serviceAccount:
+#     # Prefer IRSA: annotate the SA with the IAM role that grants s3:GetObject/PutObject.
+#     create: true
+#     annotations:
+#       eks.amazonaws.com/role-arn: "<IRSA_ROLE_ARN>"   # TODO
+#   scripts:
+#     # Mounted at /opt/boxy/scripts (referenced by the sandbox template setup/teardown).
+#     # Baked into the DERIVED controller image per boxy/README.md task B3.
+#     path: /opt/boxy/scripts
 
 # --- sandbox template default ------------------------------------------------
 # The authoritative template is the ConfigMap in k8s/sandbox-template.configmap.yaml.

@@ -65,9 +65,9 @@ Slack          nanobot                         boxy-router            sandbox (n
 
 | Phase | Trigger | What happens |
 |-------|---------|--------------|
-| Provision | `/mcp` request with an unknown `X-Sandbox-Id` | Create sandbox from template; run `setupScript` (S3 restore of `/workspace`). |
+| Provision | `/mcp` request with an unknown `X-Sandbox-Id` | Create sandbox from template with a fresh `/workspace`. _(Deferred: `setupScript` S3 restore.)_ |
 | Active | Each exec / tool call | Sliding TTL refreshed to 1h. |
-| Expire | 1h idle | `teardownScript` syncs `/workspace` → S3; sandbox reaped. |
+| Expire | 1h idle | Sandbox reaped. _(Deferred: `teardownScript` syncs `/workspace` → S3 first.)_ |
 
 Sandbox template (lives in `agent-deploy` as a ConfigMap; consumed by boxy):
 
@@ -93,13 +93,20 @@ Sandbox template (lives in `agent-deploy` as a ConfigMap; consumed by boxy):
 
 ## Persistence
 
-- `/workspace` is the per-user persistent directory inside the jail.
-- On provision, `setupScript` runs `aws s3 sync s3://$S3_BUCKET/$BOXY_SANDBOX_ID/ $BOXY_WORKSPACE/ || true`
+> **Deferred for v1.** v1 runs with boxy's **ephemeral, per-sandbox `/workspace`** (each
+> sandbox gets a fresh workspace; data does not survive a reap). The S3 backup/restore flow
+> below — including the `setupScript`/`teardownScript` hooks, the sequence diagram's S3 lane,
+> and the lifecycle table's S3 steps — is a **later milestone**. When implemented it would run
+> on a **derived** boxy-controller image (AWS CLI + hook scripts), **not** a boxy source fork.
+> boxy itself stays a deployed, pinned published dependency.
+
+- `/workspace` is the per-user workspace directory inside the jail.
+- _(Deferred)_ On provision, `setupScript` runs `aws s3 sync s3://$S3_BUCKET/$BOXY_SANDBOX_ID/ $BOXY_WORKSPACE/ || true`
   (the `|| true` keeps a brand-new user from failing provisioning).
-- On teardown, `teardownScript` runs `aws s3 sync $BOXY_WORKSPACE/ s3://$S3_BUCKET/$BOXY_SANDBOX_ID/`.
-- **Scripts run on the controller** (which has network + S3 credentials via IRSA/instance
-  role), **not in the jail** (which stays internet-isolated). AWS CLI is pre-baked into the
-  controller image.
+- _(Deferred)_ On teardown, `teardownScript` runs `aws s3 sync $BOXY_WORKSPACE/ s3://$S3_BUCKET/$BOXY_SANDBOX_ID/`.
+- _(Deferred)_ **Scripts run on the controller** (which has network + S3 credentials via
+  IRSA/instance role), **not in the jail** (which stays internet-isolated). AWS CLI would be
+  pre-baked into the derived controller image.
 
 ## Network model
 

@@ -1,25 +1,34 @@
-# boxy/ (corpbot fork/branch)
+# boxy/ (pinned upstream dependency)
 
-The **per-user sandbox runtime** for corpbot. A fork/branch of
-[niradler/boxy](https://github.com/niradler/boxy) (Go, Kubernetes, nsjail). boxy is a
+The **per-user sandbox runtime** for corpbot. boxy
+([niradler/boxy](https://github.com/niradler/boxy) — Go, Kubernetes, nsjail) is consumed as a
+**pinned published dependency**, NOT forked or built from source by corpbot: corpbot installs
+the published Helm chart `oci://ghcr.io/niradler/charts/boxy` and the GHCR images
+(`ghcr.io/niradler/boxy-{router,operator,controller}`), pinned by version. boxy is a
 **deployed service** that nanobot calls over HTTP/MCP — never a library imported into nanobot.
 
-> **Status: scaffold.** This directory documents the boxy extensions and contains the S3
-> hook script stubs. The actual fork source is not committed here; deploy via the Helm chart
+> **Status: scaffold.** This directory documents how corpbot consumes boxy and holds
+> reference material (the B2 stopgap diff, the deferred S3 hook scripts). corpbot does not
+> vendor or build boxy source; deploy via the published Helm chart
 > (see [`../agent-deploy`](../agent-deploy)).
 
 ## Ships as
 
-Helm chart `oci://ghcr.io/niradler/charts/boxy`, **pinned by version**. Components:
+Published Helm chart `oci://ghcr.io/niradler/charts/boxy`, **pinned by version** (built and
+released upstream via boxy's own `local/release.sh`). Components:
 `boxy-router` (auth + MCP/REST frontend) · `boxy-operator` (k8s controller) ·
 `boxy-controller` (per-node nsjail daemon).
 
 ## Build tasks
 
-### B1 — File tools on the `/mcp` server
+Everything corpbot needs from boxy is **already upstream** or **upstreamed via a PR**; corpbot's
+job is to **pin a boxy release**, not to maintain a fork.
 
-Extend boxy's `/mcp` server (built with the official Go MCP SDK) with file tools alongside
-the existing `bash` tool:
+### B1 — File tools on the `/mcp` server — already upstream (nothing to build)
+
+boxy's `/mcp` server (built with the official Go MCP SDK) **already ships** the file tools
+alongside the existing `bash` tool, so there is **nothing for corpbot to build** here — just
+pin a boxy release that includes them:
 
 | Tool | Signature |
 |------|-----------|
@@ -29,10 +38,10 @@ the existing `bash` tool:
 | `list_dir`   | `list_dir(path)` |
 | `make_dir`   | `make_dir(path)` |
 
-- Implement as **native controller file ops** on the per-sandbox `/workspace`.
+- Implemented upstream as **native controller file ops** on the per-sandbox `/workspace`.
   Preferred over exec wrappers: **no binary deps, no 6 MB output cap.**
-- **Confine every path to `/workspace`.** Reject `..`, absolute escapes, and symlinks that
-  point out of the workspace.
+- Paths are **confined to `/workspace`** (rejects `..`, absolute escapes, and symlinks that
+  point out of the workspace).
 
 > **Findings from the boxy MCP handler (confirmed):**
 >
@@ -47,53 +56,51 @@ the existing `bash` tool:
 >   routes to a shared default sandbox. **Deploy with the default sandbox disabled** so a
 >   missing id returns a tool-error instead. See `agent-deploy`.
 
-### B2 — Lazy provisioning
+### B2 — Per-user session routing — upstreamed via [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)
 
-When `/mcp` receives an `X-Sandbox-Id` for a sandbox that **doesn't exist**, auto-create it
-from a template (env / ConfigMap), then proceed. `sandboxId` = the incoming `X-Sandbox-Id`.
-TTL is **sliding** (refreshed per exec).
+The fix that lets an explicit `X-Sandbox-Id` resolve (and lazily create) **that sandbox's own
+session** without requiring the global default sandbox (decoupled from `DefaultSandboxEnabled`),
+so per-user routing works with the default sandbox **off**, is **upstreamed as
+[niradler/boxy#5](https://github.com/niradler/boxy/pull/5)**. corpbot's job: **pin a boxy
+release that includes PR #5.**
 
-Template (authored in `agent-deploy` as a ConfigMap):
+`sandboxId` = the incoming `X-Sandbox-Id`; TTL is **sliding** (refreshed per exec). The
+per-user template is authored in `agent-deploy` as a ConfigMap.
 
-```json
-{
-  "ttlSeconds": 3600,
-  "network": { "enabled": true, "allowInternetAccess": false },
-  "allowedBinaries": ["bash", "python3", "node", "git"],
-  "vm": {
-    "memoryMb": 512,
-    "rlimits": [
-      { "resource": "nproc",  "soft": 256 },
-      { "resource": "nofile", "soft": 1024 }
-    ]
-  },
-  "setupScript": "/opt/boxy/scripts/s3-restore.sh",
-  "teardownScript": "/opt/boxy/scripts/s3-sync.sh",
-  "scriptEnv": { "S3_BUCKET": "<bucket>" }
-}
-```
+> **Stopgap reference only:** [`patches/b2-router-session-routing.diff`](./patches/b2-router-session-routing.diff)
+> is the vendored copy of the PR #5 change, kept **only as a reference until a boxy release
+> that includes it exists**. Once such a release is published, pin it and drop the stopgap —
+> corpbot does not maintain a boxy fork.
 
-### B3 — Controller image (`Dockerfile.controller.dev`)
+### B3 — S3 `/workspace` persistence — **Deferred (later milestone)**
 
-- **Pre-bake the AWS CLI** and **every `allowedBinaries` entry** (`bash`, `python3`, `node`,
-  `git`) into the controller image.
+> **Deferred — not in v1.** v1 runs on boxy's ephemeral, per-sandbox `/workspace`; S3
+> backup/restore is a **later milestone**.
+
+When implemented, this would be a **thin derived controller image** —
+`FROM ghcr.io/niradler/boxy-controller:<ver>` plus the AWS CLI and the setup/teardown scripts —
+**NOT a fork of boxy source**:
+
+- Pre-bake the AWS CLI (every `allowedBinaries` entry — `bash`, `python3`, `node`, `git` — is
+  already in the upstream controller image).
 - Attach **S3 read/write** to the controller's **service account** (IRSA / instance role).
 - Setup/teardown scripts run **on the controller** (which has network), **not in the jail**
   (which stays internet-isolated).
 
-### C — S3 hook scripts
+### C — S3 hook scripts — **Deferred (reference for B3)**
 
-Live in [`scripts/`](./scripts) and are baked into the controller image at `/opt/boxy/scripts/`.
-boxy passes `$BOXY_SANDBOX_ID`, `$BOXY_WORKSPACE`, and `scriptEnv` (e.g. `$S3_BUCKET`).
+Reference scripts for the deferred B3 milestone, kept in [`scripts/`](./scripts). When B3
+ships they would be baked into the derived controller image at `/opt/boxy/scripts/`, with boxy
+passing `$BOXY_SANDBOX_ID`, `$BOXY_WORKSPACE`, and `scriptEnv` (e.g. `$S3_BUCKET`).
 
 - [`scripts/s3-restore.sh`](./scripts/s3-restore.sh) — `setupScript`, restores `/workspace`
-  from S3 (tolerates a brand-new user).
+  from S3 (tolerates a brand-new user). **Deferred — not wired up in v1.**
 - [`scripts/s3-sync.sh`](./scripts/s3-sync.sh) — `teardownScript`, syncs `/workspace` to S3.
+  **Deferred — not wired up in v1.**
 
 ## Checklist
 
-- [ ] B1 — `read_file` / `write_file` / `edit_file` / `list_dir` / `make_dir` on `/mcp`, path-confined to `/workspace`
-- [~] B2 — **partial, shipped as [`patches/b2-router-session-routing.diff`](./patches/b2-router-session-routing.diff)**: an explicit `X-Sandbox-Id` now resolves/creates that sandbox's session **without** requiring the global default sandbox (decoupled from `DefaultSandboxEnabled`), so per-user routing works with the default sandbox **off**. Verified live on kind. Remaining: auto-create the *sandbox* itself from a template on first unknown id (currently the sandbox is pre-created via REST)
-- [ ] B3 — controller image pre-bakes AWS CLI + allowed binaries; S3 perms via IRSA
-- [ ] C — S3 restore/sync scripts baked at `/opt/boxy/scripts/`
-- [ ] Pin the fork; publish/pin the Helm chart + image versions consumed by agent-deploy
+- [x] B1 — file tools (`read_file` / `write_file` / `edit_file` / `list_dir` / `make_dir`) ship **upstream** in boxy, path-confined to `/workspace` — nothing to build
+- [x] B2 — per-user session routing **upstreamed as [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)** (explicit `X-Sandbox-Id` resolves/creates its own session with the default sandbox **off**). Verified live on kind. `patches/b2-router-session-routing.diff` is a stopgap reference until a release with PR #5 is pinned
+- [ ] **Pin a boxy release** (chart `oci://ghcr.io/niradler/charts/boxy` + GHCR image tags) that includes PR #5, consumed by agent-deploy
+- [ ] _Deferred (later milestone):_ B3 — S3 `/workspace` persistence via a **derived** controller image (AWS CLI + hook scripts, IRSA); not a fork

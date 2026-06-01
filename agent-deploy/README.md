@@ -3,8 +3,13 @@
 The **thin deploy repo** that wires nanobot + boxy together for one company. Helm values for
 boxy, the nanobot `config.json`, secrets, the sandbox template, and k8s manifests.
 
-> This repo references boxy as a **deployed service** (its published Helm chart + the
-> in-cluster MCP endpoint). It does **not** vendor or submodule boxy/nanobot source.
+> This repo references boxy as a **deployed service** consumed from its **pinned published**
+> Helm chart (`oci://ghcr.io/niradler/charts/boxy`) + GHCR images, plus the in-cluster MCP
+> endpoint. boxy is **not** a corpbot fork; this repo does **not** vendor or submodule
+> boxy/nanobot source.
+>
+> **S3 `/workspace` persistence is deferred** to a later milestone — v1 sandboxes run on an
+> ephemeral, per-sandbox `/workspace` (no setup/teardown S3 hooks).
 
 > **Status: scaffold.** Files here are placeholders/examples (`*.example.*`). Fill in real
 > values, render to live manifests, and keep secrets out of git.
@@ -19,7 +24,7 @@ agent-deploy/
 │   └── config.example.json              # ~/.nanobot/config.json (env-templated)
 └── k8s/
     ├── namespace.yaml                   # boxy + nanobot namespaces
-    ├── sandbox-template.configmap.yaml  # the per-user sandbox template (B2)
+    ├── sandbox-template.configmap.yaml  # the per-user sandbox template (no S3 in v1)
     └── secrets.example.yaml             # secret keys (DO NOT commit real values)
 ```
 
@@ -33,10 +38,12 @@ kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/sandbox-template.configmap.yaml
 
 # 1) secrets (use your real secret manager / SOPS / sealed-secrets — example only)
-#    keys: BOXY_ROUTER_TOKEN, SLACK_BOT_TOKEN, <LLM_PROVIDER_KEY>, S3 creds (or IRSA)
+#    keys: BOXY_ROUTER_TOKEN, SLACK_BOT_TOKEN, <LLM_PROVIDER_KEY>
+#    (S3 creds/IRSA are NOT needed in v1 — S3 persistence is deferred)
 kubectl apply -f k8s/secrets.example.yaml   # after filling in real values out-of-band
 
-# 2) boxy — PINNED chart version
+# 2) boxy — install from the PINNED PUBLISHED chart (no fork / no source build).
+#    Pin a release that includes per-user routing (niradler/boxy PR #5).
 helm install boxy oci://ghcr.io/niradler/charts/boxy \
   --version <PINNED_CHART_VERSION> \
   --namespace boxy --create-namespace \
@@ -53,11 +60,13 @@ helm install boxy oci://ghcr.io/niradler/charts/boxy \
 | `BOXY_ROUTER_TOKEN` | nanobot → boxy `Authorization: Bearer` | Must match boxy-router's configured token. |
 | `SLACK_BOT_TOKEN` | nanobot Slack channel | Slack app bot token. |
 | `<LLM_PROVIDER_KEY>` | nanobot LLM calls | e.g. `ANTHROPIC_API_KEY`. |
-| S3 access | boxy controller | **Prefer IRSA / instance role** over static keys; bucket = `S3_BUCKET`. |
+| S3 access | boxy controller | _Deferred (later milestone)_ — not needed in v1. When S3 persistence lands: **prefer IRSA / instance role** over static keys; bucket = `S3_BUCKET`. |
 
 ## Pinning
 
-- **boxy chart + image**: pin `--version` and image tags in `helm/boxy-values.example.yaml`.
+- **boxy (external dependency)**: pin the **published** chart `--version` and GHCR image tags
+  in `helm/boxy-values.example.yaml` — consume, don't fork. Pin a release that includes
+  per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)).
 - **nanobot**: pin the fork image tag; keep the fork's `upstream` remote for HKUDS updates
   (see [`../nanobot/README.md`](../nanobot/README.md)).
 
@@ -74,6 +83,6 @@ touching a shared sandbox. See `helm/boxy-values.example.yaml` (`defaultSandbox.
 - [ ] Namespaces + sandbox-template ConfigMap applied
 - [ ] Secrets created via real secret manager (not committed)
 - [ ] **boxy default sandbox disabled** (`defaultSandbox.enabled: false`) — fail-closed guardrail
-- [ ] boxy installed from pinned chart version with values
+- [ ] boxy installed from pinned **published** chart version (release with PR #5) + values
 - [ ] nanobot deployed with templated `config.json` pointing at boxy `/mcp`
-- [ ] Smoke test: Slack message → tool call → sandbox provisioned → S3 restore/sync verified
+- [ ] Smoke test: Slack message → tool call → per-user sandbox provisioned (ephemeral `/workspace`; S3 restore/sync is deferred)
