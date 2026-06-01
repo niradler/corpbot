@@ -20,6 +20,12 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 WORKDIR /build
 
+# git is required to pip-install nanobot from the fork branch (git+https://...).
+# Only needed in the builder stage; the runtime image stays slim without it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 # Create an isolated venv so the runtime image carries only what we install.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -37,7 +43,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 # release is cut, switch this back to a pinned `nanobot-ai[api]>=<version>`.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install "nanobot-ai[api] @ git+https://github.com/niradler/nanobot.git@feat/tools-file-enable" \
+# Installing nanobot from a git source branch triggers its hatch webui build hook, which needs
+# a JS toolchain (bun/npm) not present in the slim builder. The gateway/agent path used by
+# corpbot does not need the bundled webui, so skip that build via the package's own escape hatch.
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 pip install "nanobot-ai[api] @ git+https://github.com/niradler/nanobot.git@feat/tools-file-enable" \
  && pip install .
 
 # --- runtime: slim, non-root ------------------------------------------------
