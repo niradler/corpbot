@@ -1,124 +1,138 @@
 # corpbot
 
-A self-hosted, **single-tenant** AI agent for one company. Many employees talk to it
-in Slack; **each user gets their own isolated execution sandbox**. The model has no local
-tools — every action runs inside a per-user [nsjail](https://github.com/google/nsjail)
-sandbox on Kubernetes, with a sliding 1-hour TTL and a per-sandbox `/workspace`.
-(S3-backed `/workspace` persistence is **deferred** to a later milestone — see the docs.)
+> A tiny [nanobot](https://github.com/HKUDS/nanobot) plugin that gives every Slack user their **own isolated execution sandbox**.
 
-> **Status — verified live.** The per-user routing has been proven end-to-end against **real
-> boxy on a local kind cluster**: two Slack users each ran `bash` in their **own** nsjail
-> sandbox with isolated, persistent `/workspace` (no cross-user leak), plus fail-closed when no
-> trusted id is present. The nanobot side ships as patches + tests + demos (this repo does not
-> vendor the HKUDS source); the one required boxy change ships as a diff.
->
-> ```text
-> [alice]  root | NSJAIL | alice-secret      # ran in alice's sandbox, wrote+read her marker
-> [bob]    NSJAIL | NO_MARKER | bob-secret   # bob never saw alice's /workspace
-> [alice2] NSJAIL | alice-secret             # alice's data persisted, not overwritten by bob
-> RESULT: PASS — real boxy on kind, per-user sandbox isolation proven
-> ```
+corpbot is the thin glue for a **self-hosted, single-tenant AI agent**: employees talk to it in Slack, and every tool the model runs (`bash`, file edits, …) executes inside a **per-user [nsjail](https://github.com/google/nsjail) sandbox** managed by [boxy](https://github.com/niradler/boxy) on Kubernetes. Each user is routed to their own sandbox by their Slack user id — never the model's choice — so one person can never touch another's workspace.
 
-## Repository layout
+It is **not a fork**. corpbot is a small Python package that plugs into stock nanobot and stock boxy:
 
-| Path | What |
-|------|------|
-| [`docs/architecture.md`](./docs/architecture.md) | Flow, sandbox lifecycle, identity/security model, limits |
-| [`nanobot/`](./nanobot) | Fork guidance + **`overlay/`** (new files), **`patches/upstream.diff`** (edits), **`tests/`**, **`scripts/`** (demo + live driver) |
-| [`boxy/`](./boxy) | How corpbot consumes boxy (pinned published dependency) + B2 stopgap diff + deferred S3 hook scripts |
-| [`agent-deploy/`](./agent-deploy) | Helm values, nanobot config, k8s manifests, secrets template |
+- **nanobot** (the agent brain + Slack ingress) runs as-is; corpbot registers as a tool plugin.
+- **boxy** (the sandbox runtime) runs as-is; corpbot is its per-user MCP client.
 
-See [`nanobot/README.md`](./nanobot/README.md) to apply the patches to your HKUDS fork and run
-the test/demo suite (mock transport, no cluster needed) or the live driver (against boxy).
+> [!NOTE]
+> Per-user routing has been verified live against real boxy on a local `kind` cluster: two users each ran `bash` in their own nsjail sandbox with an isolated, persistent `/workspace`, with no cross-user leakage and fail-closed behaviour when no user id is present.
 
-## One-liner
+## How it works
 
 ```text
 Slack message
-  → one nanobot process (asserts the Slack user id)
-    → boxy MCP  (X-Sandbox-Id = that user)
-      → per-user nsjail sandbox on k8s
-         (sliding 1h TTL, ephemeral per-sandbox /workspace; S3 persistence deferred)
+  → nanobot agent loop (asserts the Slack user id as chat_id)
+    → corpbot plugin tool (bash / read_file / write_file / edit_file)
+      → boxy /mcp  with header  X-Sandbox-Id: u-<slack-user-id>
+        → that user's nsjail sandbox on Kubernetes
 ```
 
-## Architecture
+The model only ever decides *which tool to call with what arguments*. corpbot takes the **trusted** Slack user id from nanobot's per-message context, sanitizes it into a Kubernetes-safe sandbox id, and stamps it on every boxy request — so the routing key can never come from the model or a tool argument.
 
-```text
-                ┌─────────────────────────────────────────────────────────┐
-                │                      Kubernetes                           │
-                │                                                           │
-  Slack  ─────► │  ┌────────────────┐        ┌──────────────────────────┐  │
-  (events)      │  │   nanobot      │  MCP    │   boxy-router            │  │
-                │  │  (agent brain  │ ──────► │  (auth + X-Sandbox-Id    │  │
-                │  │   + Slack      │  HTTP   │   routing)               │  │
-                │  │   ingress)     │         └────────────┬─────────────┘  │
-                │  └───────┬────────┘                      │                │
-                │          │ LLM API (egress)              ▼                │
-                │          │                  ┌──────────────────────────┐  │
-                │          ▼                  │  boxy-operator/controller │  │
-                │     LLM provider            │  per-user nsjail sandbox  │  │
-                │     (Anthropic/...)         │  /workspace (no internet) │  │
-                │                             └──────────────────────────┘  │
-                │                                                           │
-                └───────────────────────────────────────────────────────────┘
+## Features
 
-# Deferred (later milestone): setup/teardown S3 sync of /workspace
-#   boxy-controller ──► S3: s3://<bucket>/u-<user>/
-```
-
-The model acts **only** through boxy. nanobot's own shell/web/file tools are disabled.
-The LLM API calls leave from the nanobot process (which has egress); the sandbox jail
-itself has **no internet**.
+- **Per-user isolation** — each Slack user maps to a dedicated boxy sandbox keyed by `X-Sandbox-Id`.
+- **No forks** — works with the published `nanobot-ai` package and the published boxy chart; corpbot is ~200 lines of Python.
+- **Concurrency-safe** — every tool call opens a fresh, short-lived MCP connection in the caller's own task, so concurrent users never share a connection or a mutable header.
+- **Fail-closed** — a tool call with no trusted user id is refused, never routed to a default/shared sandbox.
+- **Boxy is the only execution surface** — nanobot's built-in shell/web/file tools are disabled by config; the model can only act through the sandbox.
 
 ## Components
 
-| Dir | What it is | Language | How it ships |
-|-----|-----------|----------|--------------|
-| [`nanobot/`](./nanobot) | Fork of [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — the agent brain + Slack ingress (corpbot-authored patches/plugin) | Python | Container image, config at `~/.nanobot/config.json` |
-| [`boxy/`](./boxy) | [niradler/boxy](https://github.com/niradler/boxy) — per-user sandbox runtime, consumed as an **external pinned dependency** (not a corpbot fork) | Go (k8s) | Published Helm chart `oci://ghcr.io/niradler/charts/boxy` + GHCR images, pinned by version |
-| [`agent-deploy/`](./agent-deploy) | Thin deploy repo that wires the two together (corpbot-authored) | YAML / Helm | Helm + k8s manifests |
+| Component | What it is | How it ships |
+|-----------|------------|--------------|
+| `corpbot` (this repo) | nanobot tool plugin that routes boxy tools per user | `pip install corpbot` |
+| [nanobot](https://github.com/HKUDS/nanobot) | Agent brain + Slack ingress | `pip install nanobot-ai` (stock) |
+| [boxy](https://github.com/niradler/boxy) | Per-user nsjail sandbox runtime | Helm chart `oci://ghcr.io/niradler/charts/boxy` (pinned) |
 
-> **Only nanobot (patches/plugin) and agent-deploy are corpbot-authored.** boxy is an
-> **external dependency** consumed via its **published** Helm chart + GHCR images, pinned by
-> version — **not** a corpbot fork and **not** built from source here. `agent-deploy/`
-> references boxy as a **deployed service** (Helm chart + HTTP/MCP endpoint) — **never** as a
-> git submodule of boxy source, and boxy is **never** imported as a library into nanobot.
+The plugin registers four tools via the `nanobot.tools` entry-point group: `boxy_bash`, `boxy_read_file`, `boxy_write_file`, `boxy_edit_file`.
 
-## Deploy order (Helm)
+## Getting started
 
-1. **boxy first** — `helm install` the pinned boxy chart (`oci://ghcr.io/niradler/charts/boxy`)
-   with `agent-deploy/helm/boxy-values.example.yaml`, plus the sandbox-template ConfigMap.
-2. **nanobot second** — deploy nanobot with its templated `config.json` pointing at
-   `http://boxy-router.boxy.svc.cluster.local:8080/mcp`.
+### Prerequisites
 
-Full deploy steps live in [`agent-deploy/README.md`](./agent-deploy/README.md).
+- Python 3.11+
+- A Kubernetes cluster running boxy (see [boxy](https://github.com/niradler/boxy)); locally, `kind` works.
+- A Slack app bot token and an LLM provider key.
 
-## Guardrails (read before changing anything)
+### 1. Install
 
-- **Single tenant, one company, mutually trusted users** → one boxy cluster, per-user
-  sandboxes. Do **not** build multi-tenant node pools.
-- **Routing key = Slack user id, derived from channel context** — NEVER from the model or
-  tool arguments (confused-deputy risk).
-- **boxy is the only execution surface** — do not enable nanobot's built-in shell/web/file
-  tools.
-- **Sandbox has no internet** (`allowInternetAccess: false`). LLM API calls come from the
-  nanobot process, outside the jail.
-- **boxy exec output caps at 6 MB** (`BOXY_MAX_OUTPUT_BYTES`) and truncates with a `200 OK` —
-  use the stream endpoint or file tools for large output.
-- **Pin boxy** by published chart/image version (consume, don't fork — pin a release that
-  includes [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)); keep the nanobot fork's
-  upstream remote to HKUDS for updates.
+```bash
+pip install nanobot-ai corpbot
+```
 
-## Out of scope (v1)
+### 2. Point corpbot at boxy
 
-- **S3 `/workspace` persistence is deferred.** v1 runs on boxy's ephemeral, per-sandbox
-  `/workspace`; S3 backup/restore is a **later milestone** (a derived controller image, not a
-  boxy fork). See [`docs/architecture.md`](./docs/architecture.md).
-- **No MCP gateway (Obot).** Only needed later for onboarding third-party MCP servers that
-  require per-user OAuth. Not in v1.
-- **No multi-tenancy.** This is for one company with trusted employees.
+corpbot reads two environment variables (defaults target the in-cluster boxy-router service):
 
-## Docs
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BOXY_MCP_URL` | `http://boxy-router.boxy.svc.cluster.local:8080/mcp` | boxy's MCP endpoint |
+| `BOXY_ROUTER_TOKEN` | *(none)* | Bearer token for boxy-router |
 
-- [`docs/architecture.md`](./docs/architecture.md) — full flow, sandbox lifecycle, identity
-  and security model, persistence, limits.
+### 3. Configure nanobot
+
+In `~/.nanobot/config.json`, disable the built-in tools so the model acts **only** through boxy, and enable Slack with an explicit allowlist:
+
+```json
+{
+  "tools": {
+    "exec": { "enable": false },
+    "web":  { "enable": false },
+    "file": { "enable": false }
+  },
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "token": "${SLACK_BOT_TOKEN}",
+      "allowFrom": ["<COMPANY_SLACK_USER_IDS>"]
+    }
+  }
+}
+```
+
+Because corpbot is installed, its boxy tools are auto-discovered — you do **not** add boxy as an `mcpServers` entry.
+
+> [!IMPORTANT]
+> `tools.file.enable` requires nanobot with [HKUDS/nanobot#4138](https://github.com/HKUDS/nanobot/pull/4138). Until that release, pin a nanobot build that includes the flag (`exec` and `web` already have theirs).
+
+### 4. Deploy
+
+boxy first, then nanobot. See [`agent-deploy/`](./agent-deploy) for Helm values, the templated nanobot config, the sandbox template, and k8s manifests.
+
+```bash
+helm install boxy oci://ghcr.io/niradler/charts/boxy \
+  --version <PINNED_VERSION> -n boxy --create-namespace \
+  -f agent-deploy/helm/boxy-values.example.yaml
+```
+
+> [!IMPORTANT]
+> Pin a boxy release that includes per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)), and deploy with the default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox.
+
+## Security model
+
+- **Routing key** is `u-<sanitized-slack-user-id>`, carried in the `X-Sandbox-Id` header and derived **only** from nanobot's trusted per-message `chat_id` — never the model or tool arguments (confused-deputy boundary).
+- **Sanitization** matches boxy's contract: lowercase, `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, prefixed `u-`, ≤55 chars (so the derived `<id>-session` stays within the 63-char Kubernetes label limit).
+- **Fail closed on both sides** — corpbot refuses to call boxy without a trusted id; the deploy disables boxy's default sandbox so an id-less request returns an error rather than a shared sandbox.
+- **No internet in the jail** — boxy sandboxes run with `allowInternetAccess: false`; only the nanobot process reaches the LLM API.
+
+## Development
+
+```bash
+git clone https://github.com/niradler/corpbot.git
+cd corpbot
+uv venv && uv pip install -e . pytest uvicorn
+uv run pytest -q
+```
+
+The test suite ([`tests/`](./tests)) runs a local mock boxy MCP server and asserts per-user routing for every tool, concurrent isolation across multiple users, fail-closed behaviour, and id sanitization — no cluster or LLM key required.
+
+## Status and roadmap
+
+| Item | State |
+|------|-------|
+| Per-user routing (A4) | Done — this plugin, verified live |
+| Disable built-in tools (A1) | Config-only; file flag via [HKUDS/nanobot#4138](https://github.com/HKUDS/nanobot/pull/4138) |
+| boxy per-user session routing | Upstream [niradler/boxy#5](https://github.com/niradler/boxy/pull/5) — pin a release that includes it |
+| S3-backed `/workspace` persistence | Deferred — v1 sandboxes use an ephemeral per-sandbox workspace |
+| MCP gateway for shared read-only corp sources | Out of scope for v1 |
+
+## Learn more
+
+- [`docs/architecture.md`](./docs/architecture.md) — flow, identity & security model, sandbox lifecycle, limits
+- [`agent-deploy/`](./agent-deploy) — Helm values, nanobot config, k8s manifests
