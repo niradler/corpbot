@@ -15,8 +15,19 @@ boxy state persists server-side (keyed by ``X-Sandbox-Id``), so reconnecting per
 the same sandbox and refreshes its sliding TTL.
 
 The plugin **is** the boxy client: nanobot does not configure boxy as an ``mcpServers`` entry,
-so no nanobot MCP wrapper is involved. ``BOXY_MCP_URL`` and ``BOXY_ROUTER_TOKEN`` are read from
-the environment.
+so no nanobot MCP wrapper is involved.
+
+Configuration (all read from the environment, resolved **lazily per call** so rotation works):
+
+* ``BOXY_MCP_URL`` — boxy-router ``/mcp`` endpoint (defaults to the in-cluster service).
+* ``BOXY_ROUTER_TOKEN`` — static bearer token, OR
+* ``BOXY_ROUTER_TOKEN_FILE`` — path to a file holding the bearer (e.g. a projected Kubernetes
+  ServiceAccount token that rotates on disk). When set it takes precedence and is re-read on
+  every call so token rotation is picked up without a restart.
+* ``BOXY_MCP_TIMEOUT_SECONDS`` — per-call HTTP timeout (default 120).
+
+A missing/unreadable token yields an **empty** auth header — the request still fails closed at
+boxy (which validates via TokenReview), so we never silently route with stale or absent auth.
 """
 from __future__ import annotations
 
@@ -31,15 +42,46 @@ from corpbot.routing import SANDBOX_HEADER, current_sandbox_id, set_current_sand
 
 # Defaults match the in-cluster boxy-router service; override via env at deploy time.
 DEFAULT_BOXY_MCP_URL = "http://boxy-router.boxy.svc.cluster.local:8080/mcp"
+DEFAULT_TIMEOUT_SECONDS = 120.0
 
 
 def _boxy_url() -> str:
     return os.environ.get("BOXY_MCP_URL", DEFAULT_BOXY_MCP_URL)
 
 
-def _base_headers() -> dict[str, str]:
+def _resolve_token() -> str | None:
+    """Resolve the boxy bearer token at call time (so rotation is picked up).
+
+    Precedence: ``BOXY_ROUTER_TOKEN_FILE`` (re-read fresh each call, supports rotating
+    projected SA tokens) over the static ``BOXY_ROUTER_TOKEN``. Returns ``None`` if neither
+    yields a non-empty value or the file cannot be read.
+    """
+    token_file = os.environ.get("BOXY_ROUTER_TOKEN_FILE")
+    if token_file:
+        try:
+            token = open(token_file, encoding="utf-8").read().strip()
+        except OSError:
+            return None
+        return token or None
     token = os.environ.get("BOXY_ROUTER_TOKEN")
+    return token or None
+
+
+def _auth_headers() -> dict[str, str]:
+    """Build the auth header lazily. Empty when no token — still fails closed at boxy."""
+    token = _resolve_token()
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _timeout_seconds() -> float:
+    """Per-call HTTP timeout (seconds) from env, falling back to the default."""
+    raw = os.environ.get("BOXY_MCP_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_TIMEOUT_SECONDS
 
 
 class SandboxRoutingError(RuntimeError):
@@ -59,14 +101,21 @@ def _result_text(result: Any) -> str:
 
 
 class SandboxToolInvoker:
-    """Opens a per-call boxy MCP connection scoped to the current user's sandbox id."""
+    """Opens a per-call boxy MCP connection scoped to the current user's sandbox id.
+
+    URL, auth token, and timeout are resolved **lazily per call** (not at init) so that a
+    rotating projected SA token (``BOXY_ROUTER_TOKEN_FILE``) is re-read fresh on every request.
+    Tests may pin ``url`` and ``base_headers`` to bypass env-based auth.
+    """
 
     def __init__(self, url: str | None = None, base_headers: dict[str, str] | None = None):
-        self._url = url or _boxy_url()
-        self._base_headers = dict(base_headers) if base_headers is not None else _base_headers()
+        self._url = url
+        # Explicit override (e.g. tests pass {}); ``None`` means "resolve auth per call".
+        self._base_headers = dict(base_headers) if base_headers is not None else None
 
     def _headers_for(self, sandbox_id: str) -> dict[str, str]:
-        return {**self._base_headers, SANDBOX_HEADER: sandbox_id}
+        base = self._base_headers if self._base_headers is not None else _auth_headers()
+        return {**base, SANDBOX_HEADER: sandbox_id}
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Connect with the current sandbox id, run the tool, and return result text.
@@ -86,9 +135,10 @@ class SandboxToolInvoker:
         async with httpx.AsyncClient(
             headers=self._headers_for(sandbox_id),
             follow_redirects=True,
-            timeout=None,
+            timeout=_timeout_seconds(),
         ) as client:
-            async with streamable_http_client(self._url, http_client=client) as (read, write, _):
+            url = self._url or _boxy_url()
+            async with streamable_http_client(url, http_client=client) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments=arguments)

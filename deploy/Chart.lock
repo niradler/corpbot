@@ -1,0 +1,6 @@
+dependencies:
+- name: boxy
+  repository: oci://ghcr.io/niradler/charts
+  version: 0.1.1
+digest: sha256:b95da04859e5658fd5037a9d28120b7e821c0111595e22eb21f84d1dccaa40f1
+generated: "2026-06-01T11:01:00.5269986+03:00"

@@ -1,0 +1,35 @@
+{{- if .Values.rbac.create -}}
+{{/*
+nanobot's SA needs boxy.dev RBAC in boxy's sandbox namespace. boxy-router authenticates
+nanobot's projected SA token via TokenReview, then runs a SubjectAccessReview to confirm the
+caller may act on boxy.dev sandboxes/sessions. Without this Role+RoleBinding, boxy denies the
+call (fail closed). Verbs per the corpbot architecture: get/list/create/update.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "corpbot.fullname" . }}-boxy-access
+  namespace: {{ include "corpbot.boxyNamespace" . }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["boxy.dev"]
+    resources: ["sandboxes", "sessions"]
+    verbs: ["get", "list", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "corpbot.fullname" . }}-boxy-access
+  namespace: {{ include "corpbot.boxyNamespace" . }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "corpbot.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "corpbot.fullname" . }}-boxy-access
+{{- end }}

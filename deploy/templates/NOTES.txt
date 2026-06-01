@@ -1,0 +1,41 @@
+corpbot has been installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  - nanobot (agent brain + Slack ingress + corpbot plugin): Deployment {{ include "corpbot.fullname" . }}-nanobot
+{{- if .Values.boxy.enabled }}
+  - boxy (per-user nsjail sandbox runtime): subchart, router Service {{ .Release.Name }}-router
+{{- else }}
+  - boxy: DISABLED (boxy.enabled=false) — install/manage it separately; nanobot expects its
+    /mcp endpoint at {{ .Values.nanobot.boxyClient.mcpUrl | default "the configured BOXY_MCP_URL" }}.
+{{- end }}
+
+1. Secret check
+{{- if .Values.secrets.create }}
+   A Secret "{{ include "corpbot.fullname" . }}-secrets" was rendered from values (DEV ONLY).
+   Replace it with real credentials managed out-of-band before going to production.
+{{- else if .Values.secrets.existingSecret }}
+   Using existing secret: {{ .Values.secrets.existingSecret }}
+   It must contain keys: {{ .Values.secrets.keys.slackBotToken }}, {{ .Values.secrets.keys.slackAppToken }}, {{ .Values.secrets.keys.llmApiKey }}
+   {{- if eq .Values.nanobot.boxyClient.auth "static" }}, {{ .Values.secrets.keys.boxyRouterToken }}{{- end }}
+{{- else }}
+   WARNING: no secret configured. Set secrets.existingSecret (prod) or secrets.create=true (dev).
+   Create one with, e.g.:
+     kubectl create secret generic {{ include "corpbot.fullname" . }}-secrets -n {{ .Release.Namespace }} \
+       --from-literal={{ .Values.secrets.keys.slackBotToken }}=xoxb-... \
+       --from-literal={{ .Values.secrets.keys.slackAppToken }}=xapp-... \
+       --from-literal={{ .Values.secrets.keys.llmApiKey }}=sk-ant-...
+{{- end }}
+
+2. Boxy auth: nanobot authenticates to boxy-router with a {{ .Values.nanobot.boxyClient.auth }} token.
+{{- if eq .Values.nanobot.boxyClient.auth "projected" }}
+   A projected ServiceAccount token (audience {{ .Values.nanobot.boxyClient.tokenAudience }}) is
+   mounted at {{ .Values.nanobot.boxyClient.tokenMountPath }} and validated by boxy via TokenReview.
+   nanobot's SA has boxy.dev sandboxes/sessions RBAC in namespace {{ include "corpbot.boxyNamespace" . }}.
+{{- end }}
+
+3. Watch the rollout:
+     kubectl rollout status deploy/{{ include "corpbot.fullname" . }}-nanobot -n {{ .Release.Namespace }}
+     kubectl logs -f deploy/{{ include "corpbot.fullname" . }}-nanobot -n {{ .Release.Namespace }}
+
+4. Smoke test: DM the bot in Slack. The model can ONLY act through boxy (fail-closed routing);
+   a per-user sandbox is provisioned on the first tool call (ephemeral /workspace; S3 deferred).

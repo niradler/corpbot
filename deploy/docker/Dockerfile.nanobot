@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+# -----------------------------------------------------------------------------
+# nanobot + corpbot plugin image
+#
+# Bundles BOTH stock `nanobot-ai` AND the corpbot plugin (which provides boxy's tools via the
+# `nanobot.tools` entry point and injects X-Sandbox-Id per message). Multi-stage, slim,
+# non-root. Build from the repo root so the build context contains pyproject.toml + src/.
+#
+# Build & tag (run from the repo root):
+#   docker build -f deploy/docker/Dockerfile.nanobot -t ghcr.io/niradler/corpbot-nanobot:0.1.0 .
+# Push (TODO: replace with a registry you control, then update nanobot.image in values.yaml):
+#   docker push ghcr.io/niradler/corpbot-nanobot:0.1.0
+# -----------------------------------------------------------------------------
+
+# --- builder: install into a venv we can copy to the runtime stage ----------
+FROM python:3.12-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+# Create an isolated venv so the runtime image carries only what we install.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy plugin sources and install nanobot (with the Slack/api extras) + the corpbot plugin.
+# Installing the plugin from THIS repo (pip install .) — the published `corpbot` package is the
+# same code; switch to `pip install corpbot==<ver>` once you pin a release.
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install "nanobot-ai[api]" \
+ && pip install .
+
+# --- runtime: slim, non-root ------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+# Non-root user (uid/gid must match the chart's pod securityContext: 10001).
+RUN groupadd --gid 10001 nanobot \
+ && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/nanobot --shell /usr/sbin/nologin nanobot
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    HOME=/home/nanobot \
+    PYTHONUNBUFFERED=1
+
+USER 10001:10001
+WORKDIR /home/nanobot
+
+# No privileged ports / capabilities. The gateway binds the configured port (default 18790).
+EXPOSE 18790
+
+ENTRYPOINT ["nanobot"]
+CMD ["gateway"]

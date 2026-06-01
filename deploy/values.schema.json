@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "corpbot umbrella chart values",
+  "type": "object",
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "imagePullSecrets": { "type": "array" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "nanobot": {
+      "type": "object",
+      "required": ["replicaCount", "image", "gateway", "provider", "boxyClient"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "gateway": {
+          "type": "object",
+          "required": ["host", "port"],
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "slack": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowFrom": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "provider": {
+          "type": "object",
+          "required": ["name", "model", "apiKeyEnv"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "apiKeyEnv": { "type": "string", "minLength": 1 }
+          }
+        },
+        "boxyClient": {
+          "type": "object",
+          "required": ["auth", "timeoutSeconds"],
+          "properties": {
+            "mcpUrl": { "type": "string" },
+            "timeoutSeconds": { "type": "number", "minimum": 1 },
+            "auth": { "type": "string", "enum": ["projected", "static"] },
+            "tokenAudience": { "type": "string" },
+            "tokenMountPath": { "type": "string" },
+            "expirationSeconds": { "type": "integer", "minimum": 600 }
+          }
+        },
+        "resources": { "type": "object" },
+        "podSecurityContext": { "type": "object" },
+        "containerSecurityContext": { "type": "object" },
+        "probes": { "type": "object" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" },
+        "automountServiceAccountToken": { "type": "boolean" }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "required": ["create"],
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["create", "keys"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "existingSecret": { "type": "string" },
+        "keys": {
+          "type": "object",
+          "required": ["slackBotToken", "slackAppToken", "llmApiKey", "boxyRouterToken"],
+          "properties": {
+            "slackBotToken": { "type": "string", "minLength": 1 },
+            "slackAppToken": { "type": "string", "minLength": 1 },
+            "llmApiKey": { "type": "string", "minLength": 1 },
+            "boxyRouterToken": { "type": "string", "minLength": 1 }
+          }
+        },
+        "values": { "type": "object" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "llmEgressCidrs": { "type": "array", "items": { "type": "string" } },
+        "dnsPorts": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "boxy": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  },
+  "required": ["nanobot", "serviceAccount", "rbac", "secrets", "networkPolicy", "boxy"]
+}

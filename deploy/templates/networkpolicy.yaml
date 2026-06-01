@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "corpbot.fullname" . }}-nanobot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "corpbot.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  # Ingress: only the kubelet health/readiness probes need to reach the pod. Probes originate
+  # from the node, which NetworkPolicy cannot reliably select, so kubelet probe traffic is
+  # allowed by the CNI out-of-band. Slack uses socket mode (outbound only) — no app ingress.
+  ingress: []
+  egress:
+    # DNS resolution (LLM/Slack endpoints + boxy service).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        {{- range .Values.networkPolicy.dnsPorts }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    # boxy-router MCP endpoint (in-cluster). Allow egress to the boxy namespace on the router port.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.boxy.router.servicePort | default 8080 }}
+    # Outbound to the LLM API and Slack (socket mode websocket). HTTPS.
+    {{- range .Values.networkPolicy.llmEgressCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}

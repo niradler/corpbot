@@ -93,16 +93,16 @@ Because corpbot is installed, its boxy tools are auto-discovered — you do **no
 
 ### 4. Deploy
 
-boxy first, then nanobot. See [`agent-deploy/`](./agent-deploy) for Helm values, the templated nanobot config, the sandbox template, and k8s manifests.
+The [`deploy/`](./deploy) umbrella Helm chart brings up the whole platform — boxy + nanobot (with the corpbot plugin) + supporting resources — in one install (boxy is a pinned subchart). See [`deploy/README.md`](./deploy/README.md) for details, the secret recipe, and the security posture.
 
 ```bash
-helm install boxy oci://ghcr.io/niradler/charts/boxy \
-  --version <PINNED_VERSION> -n boxy --create-namespace \
-  -f agent-deploy/helm/boxy-values.example.yaml
+helm dependency build deploy/
+helm install corpbot deploy/ -n corpbot --create-namespace \
+  --set secrets.existingSecret=corpbot-secrets
 ```
 
 > [!IMPORTANT]
-> Pin a boxy release that includes per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)), and deploy with the default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox.
+> The chart pins a boxy release that includes per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)) and keeps boxy's default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox. Build and push the nanobot+plugin image ([`deploy/docker/Dockerfile.nanobot`](./deploy/docker/Dockerfile.nanobot)) and point `nanobot.image` at it first.
 
 ## Security model
 
@@ -135,4 +135,4 @@ The test suite ([`tests/`](./tests)) runs a local mock boxy MCP server and asser
 ## Learn more
 
 - [`docs/architecture.md`](./docs/architecture.md) — flow, identity & security model, sandbox lifecycle, limits
-- [`agent-deploy/`](./agent-deploy) — Helm values, nanobot config, k8s manifests
+- [`deploy/`](./deploy) — umbrella Helm chart (boxy subchart + nanobot + plugin), nanobot image, security posture

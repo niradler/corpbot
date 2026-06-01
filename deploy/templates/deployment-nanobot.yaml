@@ -1,0 +1,170 @@
+{{- $fullname := include "corpbot.fullname" . -}}
+{{- $secretName := include "corpbot.secretName" . -}}
+{{- $bc := .Values.nanobot.boxyClient -}}
+{{/* Default boxy-router MCP URL: the boxy subchart's router Service in this namespace.
+     boxy's fullname helper is just .Release.Name, so its router Service is "<release>-router". */}}
+{{- $defaultMcpUrl := printf "http://%s-router.%s.svc.cluster.local:%v/mcp" .Release.Name .Release.Namespace (.Values.boxy.router.servicePort | default 8080) -}}
+{{- $mcpUrl := $bc.mcpUrl | default $defaultMcpUrl -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-nanobot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.nanobot.replicaCount }}
+  # Slack socket mode + per-user sandbox state make this effectively single-active; recreate.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "corpbot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "corpbot.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when the nanobot config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-nanobot.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "corpbot.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.nanobot.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nanobot
+          image: "{{ .Values.nanobot.image.repository }}:{{ .Values.nanobot.image.tag }}"
+          imagePullPolicy: {{ .Values.nanobot.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.nanobot.containerSecurityContext | nindent 12 }}
+          # Run the gateway (channels + /health). Config + home live in the writable emptyDir.
+          command: ["nanobot"]
+          args: ["gateway", "--config", "/home/nanobot/.nanobot/config.json"]
+          env:
+            - name: HOME
+              value: /home/nanobot
+            # --- LLM key + Slack tokens (from the secret) ---
+            - name: {{ .Values.nanobot.provider.apiKeyEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.llmApiKey }}
+            - name: {{ .Values.secrets.keys.slackBotToken }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.slackBotToken }}
+            - name: {{ .Values.secrets.keys.slackAppToken }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.slackAppToken }}
+            # --- corpbot plugin → boxy wiring ---
+            - name: BOXY_MCP_URL
+              value: {{ $mcpUrl | quote }}
+            - name: BOXY_MCP_TIMEOUT_SECONDS
+              value: {{ $bc.timeoutSeconds | quote }}
+            {{- if eq $bc.auth "projected" }}
+            # Rotation-safe: plugin re-reads this file on each call (kubelet rotates it on disk).
+            - name: BOXY_ROUTER_TOKEN_FILE
+              value: {{ $bc.tokenMountPath | quote }}
+            {{- else }}
+            # Static fallback: bearer comes from the secret (matches boxy router.auth.staticToken).
+            - name: BOXY_ROUTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.secrets.keys.boxyRouterToken }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.nanobot.gateway.port }}
+              protocol: TCP
+          {{- if .Values.nanobot.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              # nanobot's gateway serves GET /health → {"status":"ok"}.
+              path: /health
+              port: health
+            initialDelaySeconds: {{ .Values.nanobot.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.nanobot.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.nanobot.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.nanobot.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.nanobot.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: {{ .Values.nanobot.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.nanobot.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.nanobot.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.nanobot.probes.readiness.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.nanobot.resources | nindent 12 }}
+          volumeMounts:
+            # ~/.nanobot is writable (workspace, sessions, cron store) since rootfs is read-only.
+            - name: nanobot-home
+              mountPath: /home/nanobot
+            # Seed the rendered config.json (read-only); copied into HOME by an init container.
+            - name: nanobot-config
+              mountPath: /etc/nanobot
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq $bc.auth "projected" }}
+            - name: boxy-token
+              mountPath: {{ dir $bc.tokenMountPath }}
+              readOnly: true
+            {{- end }}
+      initContainers:
+        # Place config.json under the writable HOME (read-only rootfs forbids writing elsewhere).
+        - name: seed-config
+          image: "{{ .Values.nanobot.image.repository }}:{{ .Values.nanobot.image.tag }}"
+          imagePullPolicy: {{ .Values.nanobot.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.nanobot.containerSecurityContext | nindent 12 }}
+          command: ["sh", "-c"]
+          args:
+            - "mkdir -p /home/nanobot/.nanobot && cp /etc/nanobot/config.json /home/nanobot/.nanobot/config.json"
+          volumeMounts:
+            - name: nanobot-home
+              mountPath: /home/nanobot
+            - name: nanobot-config
+              mountPath: /etc/nanobot
+              readOnly: true
+      volumes:
+        - name: nanobot-home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: nanobot-config
+          configMap:
+            name: {{ $fullname }}-nanobot-config
+        {{- if eq $bc.auth "projected" }}
+        - name: boxy-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: {{ base $bc.tokenMountPath }}
+                  audience: {{ $bc.tokenAudience | quote }}
+                  expirationSeconds: {{ $bc.expirationSeconds }}
+        {{- end }}

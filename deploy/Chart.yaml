@@ -1,0 +1,23 @@
+apiVersion: v2
+name: corpbot
+description: >-
+  Umbrella chart for the corpbot platform: nanobot (agent brain + Slack ingress) with the
+  corpbot plugin, plus boxy (per-user nsjail sandbox runtime) as a subchart. One `helm install`
+  brings up the whole platform with security best practices (non-root, NetworkPolicy,
+  default-sandbox-off, ServiceAccount-token auth + RBAC).
+type: application
+
+# Chart version — bump on chart changes. appVersion tracks the corpbot plugin release.
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  # boxy is an EXTERNAL dependency consumed from its published chart — never forked or vendored.
+  # Pin a version that includes per-user routing (niradler/boxy PR #5). 0.1.1 is the first
+  # published release and is what these values target. Gate with boxy.enabled so corpbot's own
+  # templates can be rendered/installed standalone (e.g. when boxy is managed separately).
+  - name: boxy
+    version: "0.1.1"
+    repository: "oci://ghcr.io/niradler/charts"
+    alias: boxy
+    condition: boxy.enabled

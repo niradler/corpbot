@@ -91,7 +91,7 @@ Slack          nanobot                         boxy-router            sandbox (n
 | Active | Each exec / tool call | Sliding TTL refreshed to 1h. |
 | Expire | 1h idle | Sandbox reaped. _(Deferred: `teardownScript` syncs `/workspace` → S3 first.)_ |
 
-Sandbox template (lives in `agent-deploy` as a ConfigMap; consumed by boxy):
+Sandbox template (lives in `deploy/` as a ConfigMap; consumed by boxy):
 
 ```json
 {

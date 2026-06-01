@@ -1,0 +1,223 @@
+# =============================================================================
+# corpbot umbrella chart — values
+# -----------------------------------------------------------------------------
+# One `helm install corpbot deploy/ -n corpbot --create-namespace` brings up:
+#   * nanobot (agent brain + Slack ingress) with the corpbot plugin (the boxy MCP client)
+#   * boxy (per-user nsjail sandbox runtime) as a subchart, under the `boxy:` key below
+#
+# SECURITY: never put real secrets in this file. Slack/LLM secrets come from a Kubernetes
+# Secret (chart-created in dev, or a pre-existing one in prod). The boxy bearer is a PROJECTED
+# ServiceAccount token (rotates on disk) validated by boxy via TokenReview — not a static value.
+# =============================================================================
+
+# -- Override the chart name / fullname used for resource names.
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Pull secrets for private registries (applied to the nanobot pod).
+imagePullSecrets: []
+# - name: my-registry-creds
+
+# Scheduling passthroughs for the nanobot Deployment (best-practice escape hatches; empty = off).
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# =============================================================================
+# nanobot (agent brain + Slack ingress + corpbot plugin)
+# =============================================================================
+nanobot:
+  replicaCount: 1
+
+  image:
+    # TODO: build deploy/docker/Dockerfile.nanobot and PUSH it to a registry you control,
+    # then set repository/tag here. This image bundles BOTH `nanobot-ai` AND the corpbot plugin.
+    # Until pushed, this reference will fail to pull — there is no published corpbot image yet.
+    repository: ghcr.io/niradler/corpbot-nanobot
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  # The nanobot gateway serves channels (Slack socket mode) + an HTTP /health endpoint.
+  # It must bind 0.0.0.0 inside the pod so the kubelet can reach /health for probes.
+  gateway:
+    host: "0.0.0.0"
+    port: 18790
+
+  # Slack runs in SOCKET MODE: nanobot dials OUT to Slack over a websocket. No inbound
+  # ingress is required (the NetworkPolicy reflects this — egress only).
+  slack:
+    enabled: true
+    # Slack user/channel ids allowed to talk to the bot. Opaque tokens, matched exactly.
+    # Empty list => pairing-only mode (unapproved senders get a pairing code). Set explicitly.
+    allowFrom: []
+    # - U01ABC123     # a Slack user id
+    # bot/app tokens come from the secret (SLACK_BOT_TOKEN, SLACK_APP_TOKEN).
+
+  # LLM provider. The API key comes from the secret (key name below under secrets.keys).
+  provider:
+    name: anthropic
+    model: "claude-sonnet-4-5"
+    # Env var name the config references for the key; must match a key in the secret.
+    apiKeyEnv: ANTHROPIC_API_KEY
+
+  # corpbot plugin → boxy wiring. The plugin reads these from the environment at call time.
+  boxyClient:
+    # boxy-router /mcp endpoint. Default targets the in-release boxy subchart service.
+    # boxy's router Service is "<release>-boxy-router" when installed as the `boxy` subchart;
+    # override if boxy runs elsewhere. Port is boxy's router.servicePort (8080). Path: /mcp.
+    mcpUrl: ""   # empty => computed default (see configmap-nanobot / deployment-nanobot)
+    # Per-call HTTP timeout for boxy MCP calls (seconds).
+    timeoutSeconds: 120
+    # Auth mode to boxy-router:
+    #   projected (RECOMMENDED): mount a projected SA token; plugin reads it via
+    #     BOXY_ROUTER_TOKEN_FILE and re-reads on each call (rotation-safe). boxy validates it
+    #     with TokenReview + SubjectAccessReview against the nanobot SA's boxy.dev RBAC.
+    #   static: fall back to a BOXY_ROUTER_TOKEN secret key (matches boxy router.auth.staticToken).
+    auth: projected
+    # Audience for the projected token. boxy validates with the API server's default audience,
+    # so the cluster's API server identifier is the safe choice. Override to match your cluster.
+    tokenAudience: "https://kubernetes.default.svc"
+    # Mount path for the projected token (must be on a writable/standard volume; read-only is fine).
+    tokenMountPath: /var/run/secrets/boxy/token
+    expirationSeconds: 3600
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  # Pod-level security context. Non-root, non-zero uid/gid, RuntimeDefault seccomp.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container-level hardening. Root FS read-only; writable emptyDirs are mounted for the
+  # nanobot home/workspace and tmp (see deployment-nanobot.yaml).
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Probes hit the gateway /health endpoint (TCP+HTTP). nanobot serves GET /health → {"status":"ok"}.
+  probes:
+    liveness:
+      enabled: true
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+# =============================================================================
+# ServiceAccount + RBAC
+# =============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # Must be true: the projected boxy token is mounted via the pod's SA, and the default token
+  # mount is also how the SA identity is established. Kept explicit for clarity.
+  automountServiceAccountToken: true
+
+rbac:
+  # Create the Role + RoleBinding granting nanobot's SA access to boxy.dev sandboxes/sessions
+  # in boxy's sandbox namespace. boxy's router does a SubjectAccessReview against this when it
+  # validates nanobot's projected token — without it, calls are denied (fail closed).
+  create: true
+
+# =============================================================================
+# Secrets (Slack + LLM key). NEVER put real secrets here.
+# =============================================================================
+secrets:
+  # Dev convenience: when true, the chart renders a Secret from the (placeholder) values below.
+  # For prod, set create=false and point existingSecret at a secret you manage out-of-band.
+  create: false
+  existingSecret: ""   # e.g. "corpbot-secrets" (must contain the keys listed under `keys`)
+
+  # The env keys nanobot reads from the secret. Keep names in sync with provider.apiKeyEnv
+  # and the Slack tokens. BOXY_ROUTER_TOKEN is only used when nanobot.boxyClient.auth=static.
+  keys:
+    slackBotToken: SLACK_BOT_TOKEN
+    slackAppToken: SLACK_APP_TOKEN
+    llmApiKey: ANTHROPIC_API_KEY
+    boxyRouterToken: BOXY_ROUTER_TOKEN
+
+  # ONLY used when secrets.create=true (dev). Real deployments leave these empty and use
+  # existingSecret. These are placeholders, not real credentials.
+  values:
+    SLACK_BOT_TOKEN: ""
+    SLACK_APP_TOKEN: ""
+    ANTHROPIC_API_KEY: ""
+    BOXY_ROUTER_TOKEN: ""
+
+# =============================================================================
+# NetworkPolicy (default-deny + explicit allows)
+# =============================================================================
+networkPolicy:
+  enabled: true
+  # CIDRs nanobot may reach for outbound LLM API calls (egress). Default 0.0.0.0/0 minus
+  # cluster-internal ranges is hard to express portably, so default to allow-all egress for
+  # the LLM/Slack endpoints and rely on DNS+boxy rules; tighten to your LLM provider's ranges.
+  llmEgressCidrs:
+    - 0.0.0.0/0
+  # DNS is required for resolving the LLM/Slack endpoints and the boxy service.
+  dnsPorts: [53]
+
+# =============================================================================
+# boxy subchart (per-user nsjail sandbox runtime) — oci://ghcr.io/niradler/charts/boxy
+# Keys below map to the REAL boxy 0.1.1 values.yaml. Set boxy.enabled=false to manage boxy
+# separately (or to render/validate corpbot's own templates without the subchart).
+# =============================================================================
+boxy:
+  enabled: true
+
+  global:
+    imagePullSecrets: []
+    # Empty => boxy provisions sandboxes in the release namespace (single-namespace install).
+    sandboxNamespace: ""
+
+  router:
+    replicas: 1
+    servicePort: 8080
+    auth:
+      # SECURITY: leave empty so boxy REQUIRES a valid K8s SA token (TokenReview), which is how
+      # nanobot's projected token authenticates. Setting a staticToken also accepts that bearer
+      # (use only for local dev / e2e). Keep empty for prod.
+      staticToken: ""
+      cacheTTLSeconds: 30
+    # SECURITY GUARDRAIL: default sandbox OFF. A tool call with no X-Sandbox-Id then returns a
+    # tool-error instead of silently routing to a SHARED default sandbox (cross-user risk).
+    # boxy 0.1.1 already defaults this off; pinned here so an upstream default change can't
+    # silently re-enable it.
+    defaultSandbox:
+      enabled: false
+
+  controller:
+    # nsjail per-sandbox overlayfs requires the controller pod; its hardening is owned by the
+    # boxy chart. Per-sandbox network isolation is enforced by nsjail network namespaces.
+    maxOutputBytes: 6291456   # 6 MiB exec output cap (matches docs/architecture.md)
+    networkPolicy:
+      enabled: true
+      # Keep internet egress OFF: v1 sandboxes run with allowInternetAccess:false, so the
+      # controller does not need outbound internet. (S3 persistence is deferred.)
+      allowInternetEgress: false
+
+  # mTLS between router/operator and controller. ON by default (prod-safe) — keep it on.
+  mtls:
+    disabled: false

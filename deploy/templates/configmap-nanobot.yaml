@@ -1,0 +1,41 @@
+{{- $boxyNs := include "corpbot.boxyNamespace" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "corpbot.fullname" . }}-nanobot-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+data:
+  # Rendered to ~/.nanobot/config.json at deploy time. ${VAR} references are resolved by
+  # nanobot from the pod env (which sources Slack/LLM secrets via secretKeyRef).
+  #
+  # Built-in tools are DISABLED (exec/web/file): the model can ONLY act through boxy via the
+  # corpbot plugin (installed in the image; provides boxy's tools via the nanobot.tools entry
+  # point). The gateway binds 0.0.0.0 so the kubelet can reach GET /health for probes.
+  config.json: |
+    {
+      "gateway": {
+        "host": {{ .Values.nanobot.gateway.host | quote }},
+        "port": {{ .Values.nanobot.gateway.port }}
+      },
+      "provider": {
+        "name": {{ .Values.nanobot.provider.name | quote }},
+        "model": {{ .Values.nanobot.provider.model | quote }},
+        "apiKey": "${{"{"}}{{ .Values.nanobot.provider.apiKeyEnv }}{{"}"}}"
+      },
+      "tools": {
+        "exec": { "enable": false },
+        "web":  { "enable": false },
+        "file": { "enable": false }
+      },
+      "channels": {
+        "slack": {
+          "enabled": {{ .Values.nanobot.slack.enabled }},
+          "mode": "socket",
+          "botToken": "${{"{"}}{{ .Values.secrets.keys.slackBotToken }}{{"}"}}",
+          "appToken": "${{"{"}}{{ .Values.secrets.keys.slackAppToken }}{{"}"}}",
+          "allowFrom": {{ .Values.nanobot.slack.allowFrom | toJson }}
+        }
+      }
+    }

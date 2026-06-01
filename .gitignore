@@ -19,3 +19,8 @@ __pycache__/
 # Secrets (only *.example.* is committed)
 *.secret.yaml
 .env
+
+# Helm: do NOT vendor the boxy subchart. charts/ is pulled via `helm dependency build`.
+# Chart.lock pins the resolved digest; keep it committed for reproducible builds.
+deploy/charts/
+deploy/*.tgz
