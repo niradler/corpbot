@@ -1,16 +1,16 @@
-"""Per-message sandbox routing for the boxy MCP connection (corpbot).
+"""Per-message sandbox routing for the boxy MCP connection (corpbot plugin).
 
-corpbot routes every boxy MCP call to a *per-user* nsjail sandbox via the
-``X-Sandbox-Id`` HTTP header. The id is derived from the **trusted Slack user id**
-carried in the channel context — never from the model or from tool arguments
+corpbot routes every boxy MCP call to a *per-user* nsjail sandbox via the ``X-Sandbox-Id``
+HTTP header. The id is derived from the **trusted Slack user id** carried in the per-message
+``RequestContext`` (``chat_id``) — never from the model or from tool arguments
 (confused-deputy boundary).
 
 The id is stored in a context var, set once per message from the trusted context (see
-``apply_sandbox_id``, called from ``AgentLoop._set_tool_context``). nanobot dispatches each
-inbound message as its own asyncio task, so a context var is naturally isolated per message
-even under concurrent users. The boxy tool invoker reads it in the calling task at tool-call
-time and opens a connection whose header carries exactly that id — see
-``nanobot.agent.tools.mcp_sandbox.SandboxToolInvoker``.
+``corpbot.tools`` `set_context`, which nanobot's ``AgentLoop._set_tool_context`` invokes on
+every ``ContextAware`` tool). nanobot dispatches each inbound message as its own asyncio task,
+so a context var is naturally isolated per message even under concurrent users. The boxy tool
+invoker reads it in the calling task at tool-call time and opens a connection whose header
+carries exactly that id.
 """
 from __future__ import annotations
 
@@ -47,9 +47,9 @@ def sanitize_sandbox_id(raw: str | None) -> str | None:
     return f"u-{core}"[:_MAX_LEN].rstrip("-")
 
 
-def apply_sandbox_id(raw: str | None) -> str | None:
+def set_current_sandbox_id(chat_id: str | None) -> str | None:
     """Set the active sandbox id for this message from a trusted chat id. Returns the id."""
-    sandbox_id = sanitize_sandbox_id(raw)
+    sandbox_id = sanitize_sandbox_id(chat_id)
     _current_sandbox_id.set(sandbox_id)
     return sandbox_id
 

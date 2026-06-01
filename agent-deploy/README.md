@@ -49,7 +49,12 @@ helm install boxy oci://ghcr.io/niradler/charts/boxy \
   --namespace boxy --create-namespace \
   -f helm/boxy-values.example.yaml
 
-# 3) nanobot — mount nanobot/config.example.json (env-substituted) at ~/.nanobot/config.json
+# 3) nanobot — STOCK nanobot image with the corpbot plugin installed:
+#      pip install nanobot-ai corpbot
+#    The corpbot plugin is the boxy MCP client (per-user X-Sandbox-Id routing); set its env:
+#      BOXY_MCP_URL=http://boxy-router.boxy.svc.cluster.local:8080/mcp
+#      BOXY_ROUTER_TOKEN=<bearer matching boxy-router>
+#    Mount nanobot/config.example.json (env-substituted) at ~/.nanobot/config.json
 #    deploy the nanobot image/manifest (TODO: add nanobot Deployment manifest here)
 ```
 
@@ -57,7 +62,8 @@ helm install boxy oci://ghcr.io/niradler/charts/boxy \
 
 | Secret | Used by | Notes |
 |--------|---------|-------|
-| `BOXY_ROUTER_TOKEN` | nanobot → boxy `Authorization: Bearer` | Must match boxy-router's configured token. |
+| `BOXY_ROUTER_TOKEN` | corpbot plugin → boxy `Authorization: Bearer` | Must match boxy-router's configured token. Read from env by the plugin. |
+| `BOXY_MCP_URL` | corpbot plugin → boxy `/mcp` | boxy-router's MCP endpoint. Read from env by the plugin (defaults to the in-cluster service). |
 | `SLACK_BOT_TOKEN` | nanobot Slack channel | Slack app bot token. |
 | `<LLM_PROVIDER_KEY>` | nanobot LLM calls | e.g. `ANTHROPIC_API_KEY`. |
 | S3 access | boxy controller | _Deferred (later milestone)_ — not needed in v1. When S3 persistence lands: **prefer IRSA / instance role** over static keys; bucket = `S3_BUCKET`. |
@@ -67,8 +73,9 @@ helm install boxy oci://ghcr.io/niradler/charts/boxy \
 - **boxy (external dependency)**: pin the **published** chart `--version` and GHCR image tags
   in `helm/boxy-values.example.yaml` — consume, don't fork. Pin a release that includes
   per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)).
-- **nanobot**: pin the fork image tag; keep the fork's `upstream` remote for HKUDS updates
-  (see [`../nanobot/README.md`](../nanobot/README.md)).
+- **nanobot**: use a **stock** `nanobot-ai` image (pin its version) with the **`corpbot`
+  plugin** installed (`pip install corpbot`, pin its version). No nanobot fork — per-user
+  sandbox routing lives entirely in the plugin (see [`../docs/architecture.md`](../docs/architecture.md)).
 
 ## Security guardrail: disable boxy's default sandbox
 

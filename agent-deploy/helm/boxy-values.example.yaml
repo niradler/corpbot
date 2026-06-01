@@ -51,7 +51,7 @@ defaultSandbox:
 #       eks.amazonaws.com/role-arn: "<IRSA_ROLE_ARN>"   # TODO
 #   scripts:
 #     # Mounted at /opt/boxy/scripts (referenced by the sandbox template setup/teardown).
-#     # Baked into the DERIVED controller image per boxy/README.md task B3.
+#     # Baked into a DERIVED controller image (AWS CLI + hook scripts) when the S3 milestone lands.
 #     path: /opt/boxy/scripts
 
 # --- sandbox template default ------------------------------------------------

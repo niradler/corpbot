@@ -4,14 +4,32 @@ Single-tenant AI agent. Slack is the front door; every action the model takes ru
 per-user nsjail sandbox managed by boxy on Kubernetes. nanobot is the brain and the only
 process with outbound network access (for the LLM API). The sandbox is isolated.
 
+## Implementation (how the pieces are sourced)
+
+- **nanobot is stock** (`nanobot-ai`, no fork). Per-user sandbox routing — historically "A4" —
+  is implemented as a **thin nanobot plugin**, the published `corpbot` package. It registers
+  boxy's tools (`bash`/`read_file`/`write_file`/`edit_file`) via the `nanobot.tools` entry
+  point group; each tool is `ContextAware`, so nanobot sets the trusted per-message
+  `RequestContext` on it before the turn, and the plugin derives the sandbox id from
+  `chat_id`. **The plugin IS the boxy MCP client** — boxy is not configured as a nanobot
+  `mcpServers` entry, so no nanobot MCP wrapper is involved. Configure via env `BOXY_MCP_URL`
+  and `BOXY_ROUTER_TOKEN`. See `src/corpbot/` (`routing.py`, `tools.py`).
+- **Built-in tools off** — historically "A1" — is config only: set `tools.exec.enable=false`,
+  `tools.web.enable=false`, `tools.file.enable=false`. The `file.enable` flag lands via
+  upstream nanobot PR [HKUDS/nanobot#4138](https://github.com/HKUDS/nanobot/pull/4138).
+- **boxy** is consumed as a **pinned published Helm chart** (release with per-user routing,
+  [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)) — not forked or vendored.
+- **S3 `/workspace` persistence is deferred** to a later milestone (see Persistence below).
+
 ## Flow
 
 1. A Slack message arrives. The Slack channel sets `chat_id` = the **Slack user id**
    (trusted, taken from channel context).
-2. The agent loop runs. On the **first tool use**, nanobot connects to boxy `/mcp` and
-   registers boxy's tools (`bash`, plus the file tools).
-3. Each MCP request carries a header `X-Sandbox-Id: u-<sanitized-slack-user-id>`, injected
-   from the **trusted per-message context** — never from tool arguments.
+2. nanobot sets the trusted per-message `RequestContext` on every `ContextAware` tool (the
+   `corpbot` plugin's boxy tools) in that message's asyncio task, before the turn runs.
+3. When the model calls a boxy tool, the plugin opens a fresh boxy `/mcp` connection for that
+   call carrying `X-Sandbox-Id: u-<sanitized-slack-user-id>`, derived from the **trusted
+   per-message `chat_id`** — never from tool arguments.
 4. boxy-router sees an **unknown sandbox id** → provisions one from a template →
    `setupScript` restores `/workspace` from `s3://<bucket>/u-<user>/`.
 5. Tool calls run in the jail. **Each exec refreshes the sliding 1h TTL.**
@@ -44,12 +62,16 @@ Slack          nanobot                         boxy-router            sandbox (n
 ## Identity & security model
 
 - **Routing key** is `u-<sanitized-slack-user-id>`, carried as the `X-Sandbox-Id` header.
-- **Derivation:** the Slack user id comes from the per-message **channel context** that
-  nanobot trusts. It is injected into every MCP request by the nanobot MCP wrapper.
+- **Derivation:** the Slack user id comes from the per-message **`RequestContext.chat_id`**
+  that nanobot trusts. The `corpbot` plugin reads it in `set_context` (called by nanobot per
+  message), stores the sanitized id in a `contextvar`, and injects it on the `X-Sandbox-Id`
+  header of every boxy MCP call. Each inbound message is its own asyncio task, so the
+  `contextvar` is concurrency-safe across users.
 - **It must never come from the LLM or from tool arguments.** Letting the model choose the
   sandbox id would be a confused-deputy vulnerability (one user reading another's workspace).
-- **Sanitization** (`sanitize(chat_id)`): lowercase, keep only `[a-z0-9-]`, prefix `u-`,
-  truncate to 63 chars (k8s RFC1123 label). Slack ids are uppercase, so lowercasing matters.
+- **Sanitization** (`sanitize_sandbox_id(chat_id)`): lowercase, keep only `[a-z0-9-]`, prefix
+  `u-`, cap at 55 chars so the derived `<id>-session` stays ≤63 (k8s RFC1123 label). Slack ids
+  are uppercase, so lowercasing matters.
 - **Path confinement:** boxy's file tools confine every path to `/workspace` and reject `..`,
   absolute escapes, and symlinks that point outside the workspace.
 - **Fail closed, both sides:** nanobot refuses to call boxy without a trusted id

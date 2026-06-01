@@ -2,7 +2,11 @@
 _explore/
 
 # Python
+.venv/
 **/.venv/
+*.egg-info/
+build/
+dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
