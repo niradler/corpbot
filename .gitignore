@@ -3,6 +3,7 @@ _explore/
 
 # Python
 .venv/
+.venv*/
 **/.venv/
 *.egg-info/
 build/

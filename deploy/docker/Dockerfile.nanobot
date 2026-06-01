@@ -27,9 +27,17 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy plugin sources and install nanobot (with the Slack/api extras) + the corpbot plugin.
 # Installing the plugin from THIS repo (pip install .) — the published `corpbot` package is the
 # same code; switch to `pip install corpbot==<ver>` once you pin a release.
+#
+# IMPORTANT: nanobot is installed from the corpbot fork branch, which carries the
+# `tools.file.enable` flag (HKUDS/nanobot#4138). That flag is REQUIRED so the config can
+# disable nanobot's built-in filesystem tools — otherwise, on stock nanobot 0.2.0, the built-in
+# read_file/write_file/edit_file (and exec) tools stay enabled AND collide with the corpbot
+# plugin's same-named tools (the plugin tools get skipped). With #4138 the built-ins are
+# disabled and the corpbot tools are the only execution surface. Once #4138 is merged and a
+# release is cut, switch this back to a pinned `nanobot-ai[api]>=<version>`.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install "nanobot-ai[api]" \
+RUN pip install "nanobot-ai[api] @ git+https://github.com/niradler/nanobot.git@feat/tools-file-enable" \
  && pip install .
 
 # --- runtime: slim, non-root ------------------------------------------------

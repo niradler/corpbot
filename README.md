@@ -10,7 +10,13 @@ It is **not a fork**. corpbot is a small Python package that plugs into stock na
 - **boxy** (the sandbox runtime) runs as-is; corpbot is its per-user MCP client.
 
 > [!NOTE]
-> Per-user routing has been verified live against real boxy on a local `kind` cluster: two users each ran `bash` in their own nsjail sandbox with an isolated, persistent `/workspace`, with no cross-user leakage and fail-closed behaviour when no user id is present.
+> **Verified end-to-end on real infrastructure.** Using nanobot's real agent loop with a real
+> LLM ([Ollama](https://ollama.com) `llama3.2:3b`) against real boxy on a local `kind` cluster:
+> the model decided to call the `bash` tool, the corpbot plugin routed it per-user via
+> `X-Sandbox-Id`, and a real nsjail sandbox executed it. Two users hit separate sandboxes
+> (`u-u07alice` ran a command and wrote a file; `u-u07bob` saw `NO_MARKER` — no leakage), and a
+> call with no user id is refused (fail-closed). The umbrella Helm chart installs cleanly on
+> kind and the nanobot+plugin image is built and published.
 
 ## How it works
 
