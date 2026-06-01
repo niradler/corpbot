@@ -19,10 +19,16 @@ data:
         "host": {{ .Values.nanobot.gateway.host | quote }},
         "port": {{ .Values.nanobot.gateway.port }}
       },
-      "provider": {
-        "name": {{ .Values.nanobot.provider.name | quote }},
-        "model": {{ .Values.nanobot.provider.model | quote }},
-        "apiKey": "${{"{"}}{{ .Values.nanobot.provider.apiKeyEnv }}{{"}"}}"
+      "agents": {
+        "defaults": {
+          "model": {{ .Values.nanobot.provider.model | quote }},
+          "provider": {{ .Values.nanobot.provider.name | quote }}
+        }
+      },
+      "providers": {
+        {{ .Values.nanobot.provider.name | quote }}: {
+          "apiKey": "${{"{"}}{{ .Values.nanobot.provider.apiKeyEnv }}{{"}"}}"
+        }
       },
       "tools": {
         "exec": { "enable": false },
