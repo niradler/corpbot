@@ -46,7 +46,7 @@ from corpbot.routing import (
     SESSION_HEADER,
     current_session_id,
     sandbox_config_id,
-    set_current_session_id,
+    set_current_session,
 )
 
 # Defaults match the in-cluster boxy-router service; override via env at deploy time.
@@ -54,6 +54,24 @@ DEFAULT_BOXY_MCP_URL = "http://boxy-router.boxy.svc.cluster.local:8080/mcp"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
 _log = logging.getLogger("corpbot.tools")
+
+
+def _trusted_identity(ctx: RequestContext) -> tuple[str | None, str | None, bool]:
+    """Extract ``(user_id, conversation_id, is_dm)`` from a trusted per-message context.
+
+    For Slack, the user id and conversation type live in ``ctx.metadata["slack"]`` (populated by
+    nanobot's Slack channel: ``event.user`` and ``channel_type == "im"``). For other channels — or
+    if that metadata is absent — fall back to ``ctx.chat_id`` as the key and treat it as a non-DM
+    conversation, preserving prior behaviour.
+    """
+    conversation_id = ctx.chat_id
+    slack = (ctx.metadata or {}).get("slack") or {}
+    if slack:
+        event = slack.get("event") or {}
+        user_id = event.get("user") or None
+        is_dm = (slack.get("channel_type") or "") == "im"
+        return user_id, conversation_id, is_dm
+    return conversation_id, conversation_id, False
 
 
 def _boxy_url() -> str:
@@ -192,8 +210,14 @@ class _BoxyTool(Tool):
     _override_invoker: SandboxToolInvoker | None = None
 
     def set_context(self, ctx: RequestContext) -> None:
-        """nanobot calls this once per message; derive the per-user session id from the trusted chat id."""
-        set_current_session_id(ctx.chat_id)
+        """nanobot calls this once per message; derive the session id from trusted identity.
+
+        DMs key per-user; channels follow ``BOXY_SESSION_SCOPE`` (see :mod:`corpbot.routing`). The
+        Slack user id and conversation type come from the trusted per-message context metadata,
+        never from the model or tool arguments.
+        """
+        user_id, conversation_id, is_dm = _trusted_identity(ctx)
+        set_current_session(user_id, conversation_id, is_dm)
 
     def _invoker_override(self, invoker: SandboxToolInvoker) -> None:
         """Point this tool instance at a specific invoker (used by tests)."""

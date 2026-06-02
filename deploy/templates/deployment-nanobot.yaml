@@ -89,6 +89,10 @@ spec:
             # (templates/sandbox.yaml) every user's sandbox is built from.
             - name: BOXY_SANDBOX_CONFIG_ID
               value: {{ .Values.sandbox.sandboxId | quote }}
+            # Channel session scope: per-user (default, every member isolated) or per-channel
+            # (whole channel shares one sandbox). DMs are ALWAYS per-user regardless.
+            - name: BOXY_SESSION_SCOPE
+              value: {{ .Values.sandbox.sessionScope | quote }}
             {{- if eq $bc.auth "projected" }}
             # Rotation-safe: plugin re-reads this file on each call (kubelet rotates it on disk).
             - name: BOXY_ROUTER_TOKEN_FILE

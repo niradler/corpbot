@@ -2,14 +2,21 @@
 
 boxy routes each ``/mcp`` call with two headers that play distinct roles:
 
-* ``X-Session-Id`` — the per-**user** runtime key. corpbot derives it from the **trusted Slack
-  user id** carried in the per-message ``RequestContext`` (``chat_id``) — never from the model or
-  tool arguments (confused-deputy boundary). One reused sandbox per user.
-* ``X-Sandbox-Id`` — the **config** to build that user's sandbox from: the id of a boxy ``Sandbox``
-  CR (the shape — allowed binaries, vm, network, TTL). It is the same for every user (a deploy-time
+* ``X-Session-Id`` — the runtime key boxy uses to pick/create the sandbox. corpbot derives it from
+  **trusted identity** in the per-message ``RequestContext`` (never from the model or tool
+  arguments — confused-deputy boundary), scoped per the rules below. One reused sandbox per key.
+* ``X-Sandbox-Id`` — the **config** to build that sandbox from: the id of a boxy ``Sandbox`` CR
+  (the shape — allowed binaries, vm, network, TTL). It is the same for every user (a deploy-time
   value), so one shared config serves all users without a CR per user.
 
-The per-user session id is stored in a context var, set once per message from the trusted context
+Session scoping (which trusted id becomes ``X-Session-Id``):
+
+* **DMs are always per-user** — a direct message is inherently 1:1, so the key is the Slack user id.
+* **Channels are configurable** via ``BOXY_SESSION_SCOPE`` (see :data:`DEFAULT_SESSION_SCOPE`):
+  ``per-user`` (default) gives every member their own sandbox even inside a shared channel;
+  ``per-channel`` shares one sandbox across the whole channel (keyed by the conversation id).
+
+The resolved session id is stored in a context var, set once per message from the trusted context
 (see ``corpbot.tools`` ``set_context``). nanobot dispatches each inbound message as its own asyncio
 task, so the context var is naturally isolated per message even under concurrent users. The boxy
 tool invoker reads it at tool-call time and opens a connection whose headers carry exactly that
@@ -34,6 +41,13 @@ _MAX_LEN = 63
 # the corpbot chart's sandbox.sandboxId default.
 DEFAULT_SANDBOX_CONFIG_ID = "default"
 
+# Session scope for CHANNEL messages (env BOXY_SESSION_SCOPE). DMs are ALWAYS per-user (a DM is
+# inherently 1:1), so this knob only changes channel behaviour. Default is the documented
+# "one sandbox per user" intent — the isolating, secure choice.
+DEFAULT_SESSION_SCOPE = "per-user"
+_SESSION_SCOPE_ENV = "BOXY_SESSION_SCOPE"
+_SESSION_SCOPES = ("per-user", "per-channel")
+
 # Trusted per-user session id for the current async context (message task). Set per message.
 _current_session_id: ContextVar[str | None] = ContextVar("current_session_id", default=None)
 
@@ -56,9 +70,45 @@ def sanitize_session_id(raw: str | None) -> str | None:
     return f"u-{core}"[:_MAX_LEN].rstrip("-")
 
 
+def session_scope() -> str:
+    """Return the channel session scope from the environment (``per-user`` | ``per-channel``).
+
+    Resolved lazily per message so a ``helm upgrade`` is picked up without a restart. Unknown or
+    empty values fall back to :data:`DEFAULT_SESSION_SCOPE`.
+    """
+    val = os.environ.get(_SESSION_SCOPE_ENV, "").strip().lower()
+    return val if val in _SESSION_SCOPES else DEFAULT_SESSION_SCOPE
+
+
+def resolve_session_id(
+    user_id: str | None, conversation_id: str | None, is_dm: bool
+) -> str | None:
+    """Pick the trusted raw key for this message and sanitize it into a boxy session id.
+
+    DMs are always keyed by the user (1:1). Channels follow :func:`session_scope`: ``per-user``
+    keys by the user (isolated), ``per-channel`` keys by the conversation (shared). The user id is
+    preferred with the conversation id as a fallback so a missing field still fails closed rather
+    than cross-routing. Returns ``None`` when no usable id exists (callers fail closed).
+    """
+    if is_dm or session_scope() == "per-user":
+        raw = user_id or conversation_id
+    else:
+        raw = conversation_id or user_id
+    return sanitize_session_id(raw)
+
+
 def set_current_session_id(chat_id: str | None) -> str | None:
     """Set the active per-user session id for this message from a trusted chat id. Returns the id."""
     session_id = sanitize_session_id(chat_id)
+    _current_session_id.set(session_id)
+    return session_id
+
+
+def set_current_session(
+    user_id: str | None, conversation_id: str | None, is_dm: bool
+) -> str | None:
+    """Resolve (per scope) and set the active session id for this message. Returns the id."""
+    session_id = resolve_session_id(user_id, conversation_id, is_dm)
     _current_session_id.set(session_id)
     return session_id
 
