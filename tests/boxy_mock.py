@@ -1,9 +1,10 @@
 """Minimal local stand-in for boxy's ``/mcp`` server — for plugin routing tests.
 
 Exposes the boxy tools the corpbot plugin calls (``bash``/``read_file``/``write_file``/
-``edit_file``). Each tool returns the ``X-Sandbox-Id`` header the request carried, so a caller
-can prove per-user routing actually reaches the server over the real MCP streamable-HTTP
-transport. This is NOT boxy — just enough MCP to exercise the wire.
+``edit_file``). Each tool returns ``"<X-Session-Id>|<X-Sandbox-Id>"`` — the per-user session key
+and the shared config id the request carried — so a caller can prove the two-header routing
+actually reaches the server over the real MCP streamable-HTTP transport. This is NOT boxy — just
+enough MCP to exercise the wire.
 """
 from __future__ import annotations
 
@@ -15,31 +16,37 @@ import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 
 
-def _seen_sandbox(ctx: Context) -> str:
+def _seen(ctx: Context) -> str:
     request = ctx.request_context.request
-    sandbox = request.headers.get("x-sandbox-id") if request is not None else None
-    return sandbox or "<none>"
+    headers = request.headers if request is not None else {}
+    session = headers.get("x-session-id") or "<none>"
+    config = headers.get("x-sandbox-id") or "<none>"
+    return f"{session}|{config}"
 
 
 def build_app():
     """Build the FastMCP streamable-HTTP ASGI app exposing boxy's tools."""
     mcp = FastMCP("boxy-mock", stateless_http=True)
 
-    @mcp.tool(description="Run a bash command; returns the X-Sandbox-Id the server received.")
+    @mcp.tool(description="Run a bash command; returns '<session>|<config>' the server received.")
     async def bash(command: str, ctx: Context) -> str:
-        return _seen_sandbox(ctx)
+        return _seen(ctx)
 
-    @mcp.tool(description="Read a file; returns the X-Sandbox-Id the server received.")
+    @mcp.tool(description="Read a file; returns '<session>|<config>' the server received.")
     async def read_file(path: str, ctx: Context) -> str:
-        return _seen_sandbox(ctx)
+        return _seen(ctx)
 
-    @mcp.tool(description="Write a file; returns the X-Sandbox-Id the server received.")
+    @mcp.tool(description="Write a file; returns '<session>|<config>' the server received.")
     async def write_file(path: str, content: str, ctx: Context) -> str:
-        return _seen_sandbox(ctx)
+        return _seen(ctx)
 
-    @mcp.tool(description="Edit a file; returns the X-Sandbox-Id the server received.")
+    @mcp.tool(description="Edit a file; returns '<session>|<config>' the server received.")
     async def edit_file(path: str, old_string: str, new_string: str, ctx: Context) -> str:
-        return _seen_sandbox(ctx)
+        return _seen(ctx)
+
+    @mcp.tool(description="Always errors — exercises the boxy tool-level error (isError) path.")
+    async def boom(ctx: Context) -> str:
+        raise RuntimeError("simulated boxy tool failure")
 
     return mcp.streamable_http_app()
 

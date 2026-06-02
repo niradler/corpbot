@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "corpbot"
-version = "0.1.0"
-description = "Thin nanobot plugin: routes boxy MCP tool calls to a per-user sandbox via X-Sandbox-Id."
+version = "0.1.1"
+description = "Thin nanobot plugin: routes boxy MCP tool calls to a per-user sandbox via X-Session-Id (user) + X-Sandbox-Id (shared config)."
 requires-python = ">=3.11"
 dependencies = ["nanobot-ai", "httpx", "mcp"]
 

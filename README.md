@@ -13,7 +13,7 @@ It is **not a fork**. corpbot is a small Python package that plugs into stock na
 > **Verified end-to-end on real infrastructure.** Using nanobot's real agent loop with a real
 > LLM ([Ollama](https://ollama.com) `llama3.2:3b`) against real boxy on a local `kind` cluster:
 > the model decided to call the `bash` tool, the corpbot plugin routed it per-user via
-> `X-Sandbox-Id`, and a real nsjail sandbox executed it. Two users hit separate sandboxes
+> `X-Session-Id`, and a real nsjail sandbox executed it. Two users hit separate sandboxes
 > (`u-u07alice` ran a command and wrote a file; `u-u07bob` saw `NO_MARKER` — no leakage), and a
 > call with no user id is refused (fail-closed). The umbrella Helm chart installs cleanly on
 > kind and the nanobot+plugin image is built and published.
@@ -24,15 +24,16 @@ It is **not a fork**. corpbot is a small Python package that plugs into stock na
 Slack message
   → nanobot agent loop (asserts the Slack user id as chat_id)
     → corpbot plugin tool (bash / read_file / write_file / edit_file)
-      → boxy /mcp  with header  X-Sandbox-Id: u-<slack-user-id>
+      → boxy /mcp  with headers  X-Session-Id: u-<slack-user-id>  (the user)
+                                  X-Sandbox-Id: <config id>        (shared config)
         → that user's nsjail sandbox on Kubernetes
 ```
 
-The model only ever decides *which tool to call with what arguments*. corpbot takes the **trusted** Slack user id from nanobot's per-message context, sanitizes it into a Kubernetes-safe sandbox id, and stamps it on every boxy request — so the routing key can never come from the model or a tool argument.
+The model only ever decides *which tool to call with what arguments*. corpbot takes the **trusted** Slack user id from nanobot's per-message context, sanitizes it into a Kubernetes-safe per-user **session** id (`X-Session-Id`), and stamps it on every boxy request — so the routing key can never come from the model or a tool argument. A second header, `X-Sandbox-Id`, names the shared boxy `Sandbox` **config** (the same for every user) that each per-user sandbox is built from; boxy provisions one isolated session per user from that single config.
 
 ## Features
 
-- **Per-user isolation** — each Slack user maps to a dedicated boxy sandbox keyed by `X-Sandbox-Id`.
+- **Per-user isolation** — each Slack user maps to a dedicated boxy session keyed by `X-Session-Id`, built from one shared `Sandbox` config (`X-Sandbox-Id`) — no CR per user.
 - **No forks** — works with the published `nanobot-ai` package and the published boxy chart; corpbot is ~200 lines of Python.
 - **Concurrency-safe** — every tool call opens a fresh, short-lived MCP connection in the caller's own task, so concurrent users never share a connection or a mutable header.
 - **Fail-closed** — a tool call with no trusted user id is refused, never routed to a default/shared sandbox.
@@ -108,12 +109,12 @@ helm install corpbot deploy/ -n corpbot --create-namespace \
 ```
 
 > [!IMPORTANT]
-> The chart pins a boxy release that includes per-user routing ([niradler/boxy#5](https://github.com/niradler/boxy/pull/5)) and keeps boxy's default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox. Build and push the nanobot+plugin image ([`deploy/docker/Dockerfile.nanobot`](./deploy/docker/Dockerfile.nanobot)) and point `nanobot.image` at it first.
+> The chart pins a boxy release that includes per-user session provisioning ([niradler/boxy#6](https://github.com/niradler/boxy/pull/6)) and keeps boxy's default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox. Build and push the nanobot+plugin image ([`deploy/docker/Dockerfile.nanobot`](./deploy/docker/Dockerfile.nanobot)) and point `nanobot.image` at it first.
 
 ## Security model
 
-- **Routing key** is `u-<sanitized-slack-user-id>`, carried in the `X-Sandbox-Id` header and derived **only** from nanobot's trusted per-message `chat_id` — never the model or tool arguments (confused-deputy boundary).
-- **Sanitization** matches boxy's contract: lowercase, `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, prefixed `u-`, ≤55 chars (so the derived `<id>-session` stays within the 63-char Kubernetes label limit).
+- **Routing key** is `u-<sanitized-slack-user-id>`, carried in the `X-Session-Id` header and derived **only** from nanobot's trusted per-message `chat_id` — never the model or tool arguments (confused-deputy boundary). The companion `X-Sandbox-Id` header names the shared `Sandbox` **config** (a deploy-time value), not the user.
+- **Sanitization** matches boxy's contract: lowercase, `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, prefixed `u-`, ≤63 chars (boxy uses `X-Session-Id` verbatim as the Kubernetes-label-backed Session name).
 - **Fail closed on both sides** — corpbot refuses to call boxy without a trusted id; the deploy disables boxy's default sandbox so an id-less request returns an error rather than a shared sandbox.
 - **No internet in the jail** — boxy sandboxes run with `allowInternetAccess: false`; only the nanobot process reaches the LLM API.
 

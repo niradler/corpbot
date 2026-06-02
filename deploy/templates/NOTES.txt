@@ -39,3 +39,12 @@ Components:
 
 4. Smoke test: DM the bot in Slack. The model can ONLY act through boxy (fail-closed routing);
    a per-user sandbox is provisioned on the first tool call (ephemeral /workspace; S3 deferred).
+{{- if and .Values.sandbox.enabled .Values.sandbox.network.allowInternet (not .Values.sandbox.network.restrictToPublicInternet) }}
+
+WARNING: sandbox.network.allowInternet=true with restrictToPublicInternet=false. The corpbot
+   public-egress guardrail (deny internal ranges) is NOT rendered. Sandbox egress is then governed
+   solely by boxy.controller.networkPolicy.allowInternetEgress: false => no internet at all; true =>
+   BLUNT all-egress including cluster-internal Services, the Kubernetes API, peer pods, and the
+   cloud metadata endpoint (169.254.169.254). Set restrictToPublicInternet=true unless you require
+   in-cluster reachability and accept that risk.
+{{- end }}

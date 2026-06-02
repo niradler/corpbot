@@ -53,11 +53,19 @@ nanobot:
     # - U01ABC123     # a Slack user id
     # bot/app tokens come from the secret (SLACK_BOT_TOKEN, SLACK_APP_TOKEN).
 
-  # LLM provider. The API key comes from the secret (key name below under secrets.keys).
+  # LLM provider. nanobot resolves the provider by `name` (see nanobot's provider registry:
+  # anthropic, openai, gemini, bedrock, openrouter, ollama, lm_studio, vllm, custom, …).
   provider:
     name: anthropic
     model: "claude-sonnet-4-5"
-    # Env var name the config references for the key; must match a key in the secret.
+    # Base URL for OpenAI-compatible / self-hosted / local providers. REQUIRED for
+    # ollama / lm_studio / vllm / custom; LEAVE EMPTY for first-party providers (anthropic,
+    # gemini, …) whose endpoint nanobot already knows. Maps to nanobot `providers.<name>.apiBase`.
+    #   Ollama example:  name: ollama,  model: "qwen3.5:latest",  apiBase: "http://<host>:11434"
+    apiBase: ""
+    # Env var name the config references for the API key; must match a key in the secret
+    # (secrets.keys.llmApiKey). Set to "" for KEYLESS local providers (ollama / lm_studio / vllm) —
+    # when empty, no API key is injected into the pod and none is written to the nanobot config.
     apiKeyEnv: ANTHROPIC_API_KEY
 
   # corpbot plugin → boxy wiring. The plugin reads these from the environment at call time.
@@ -74,9 +82,13 @@ nanobot:
     #     with TokenReview + SubjectAccessReview against the nanobot SA's boxy.dev RBAC.
     #   static: fall back to a BOXY_ROUTER_TOKEN secret key (matches boxy router.auth.staticToken).
     auth: projected
-    # Audience for the projected token. boxy validates with the API server's default audience,
-    # so the cluster's API server identifier is the safe choice. Override to match your cluster.
-    tokenAudience: "https://kubernetes.default.svc"
+    # Audience for the projected token. boxy's router runs TokenReview WITHOUT an explicit
+    # audience, so the API server validates the token against its OWN default audience
+    # (--api-audiences, which defaults to the service-account issuer). On kubeadm/kind and the
+    # major managed clusters that issuer is "https://kubernetes.default.svc.cluster.local", so a
+    # token minted for the shorter "https://kubernetes.default.svc" is rejected 401. Use the
+    # fully-qualified default; override only if your cluster's --api-audiences differs.
+    tokenAudience: "https://kubernetes.default.svc.cluster.local"
     # Mount path for the projected token (must be on a writable/standard volume; read-only is fine).
     tokenMountPath: /var/run/secrets/boxy/token
     expirationSeconds: 3600
@@ -176,8 +188,97 @@ networkPolicy:
   # the LLM/Slack endpoints and rely on DNS+boxy rules; tighten to your LLM provider's ranges.
   llmEgressCidrs:
     - 0.0.0.0/0
+  # TCP ports nanobot may use for outbound LLM/Slack traffic. Default 443 (HTTPS) covers
+  # first-party providers and Slack socket mode. Add your LLM port for self-hosted/local
+  # backends — e.g. add 11434 for Ollama, 1234 for LM Studio, 8000 for vLLM.
+  llmEgressPorts: [443]
   # DNS is required for resolving the LLM/Slack endpoints and the boxy service.
   dnsPorts: [53]
+
+# =============================================================================
+# Sandbox customization — the per-user nsjail sandbox template + network policy
+# -----------------------------------------------------------------------------
+# This is THE place to customize what every user's sandbox looks like: resources, allowed
+# binaries, TTL, and (most importantly) network access. corpbot renders these into a boxy
+# `Sandbox` custom resource (boxy.dev/v1alpha1) — see templates/sandbox.yaml — which is boxy's
+# documented "config template for creating sessions". Every field below is commented; edit here,
+# `helm upgrade`, done.
+#
+# HOW IT REACHES A USER'S SANDBOX: nanobot's plugin sends two headers — `X-Session-Id`
+# (`u-<slack-id>`, the per-user key) and `X-Sandbox-Id` (this config's `sandboxId`). On a user's
+# first call boxy provisions their session from THIS shared `Sandbox` config CR; later calls reuse
+# it. One config serves all users — there is no CR per user.
+#   NOTE: the config CR carries the `boxy.dev/sandbox-id` label so boxy's router/operator can
+#   resolve it. The blunt, always-effective network lever is the policy below (sandboxes share the
+#   boxy controller pod's network namespace — see also boxy's allowInternetAccess multi-tenant note).
+# =============================================================================
+sandbox:
+  # Render the Sandbox CR + sandbox NetworkPolicy. Set false to let boxy use only its built-in
+  # defaults (and manage sandbox shape elsewhere).
+  enabled: true
+
+  # Name/id of the sandbox template CR. Keep lowercase RFC1123 (boxy contract:
+  # ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$). "default" is the conventional template id.
+  sandboxId: "default"
+
+  # Sliding TTL: a sandbox is reaped after this many idle seconds (refreshed on each exec).
+  # Must be <= boxy.router.maxSandboxTTLSeconds. 3600 = 1h (matches docs/architecture.md).
+  ttlSeconds: 3600
+
+  # EXTRA binaries bind-mounted into the jail from /usr/local/bin ON THE CONTROLLER IMAGE — this is
+  # NOT the base shell/coreutils. The Ubuntu 24.04 sandbox rootfs already provides bash/sh/cat/ls/…,
+  # so do NOT list those: listing "bash" makes boxy try to copy /usr/local/bin/bash, which the stock
+  # controller image does not ship, failing session create with
+  #   copy binary "bash": open /usr/local/bin/bash: no such file or directory
+  # The published boxy controller image ships no extra binaries, so the correct default is empty.
+  # To offer python3/node/git (etc.), build a CUSTOM controller image that places each at
+  # /usr/local/bin/<name> (Dockerfile.controller.dev pattern — the "two-path rule": present on the
+  # controller AND runnable in the rootfs), set boxy.controller.image to it, then list them here.
+  allowedBinaries: []
+
+  # Non-reserved env vars injected into every sandbox (keys starting with BOXY_/KUBERNETES_ are
+  # rejected by boxy). Example: { "TZ": "UTC" }.
+  env: {}
+
+  # VM/jail resource shape. See the boxy Sandbox CRD for the full field set (rlimits, hostname,
+  # idleTimeoutSec, scripts, …). memoryMb 64–65536, vcpus 1–64.
+  vm:
+    memoryMb: 512
+    vcpus: 1
+    workdir: "/workspace"
+    shell: "/bin/bash"
+
+  # ---------------------------------------------------------------------------
+  # Network access — the security-critical knob.
+  # ---------------------------------------------------------------------------
+  network:
+    # Master switch. false (DEFAULT, most secure) => the jail has NO internet at all. The LLM
+    # API is reached by the nanobot process (outside the jail), never by sandbox code.
+    allowInternet: false
+
+    # Only meaningful when allowInternet=true. true (RECOMMENDED) => sandboxes may reach the
+    # PUBLIC internet but NOT cluster-internal services, the Kubernetes API, other pods, or the
+    # cloud metadata endpoint (169.254.169.254). Implemented as a corpbot-owned NetworkPolicy on
+    # boxy's controller pods (sandboxes share that pod's netns): allow 0.0.0.0/0 EXCEPT the
+    # privateCidrs below. Set false ONLY if a sandbox must reach an in-cluster service (then it
+    # gets the blunt all-egress; combine with boxy.controller.networkPolicy.allowInternetEgress).
+    restrictToPublicInternet: true
+
+    # Namespace the cluster DNS (kube-dns/CoreDNS) runs in; sandbox DNS egress is scoped to it.
+    dnsNamespace: kube-system
+
+    # Non-publicly-routable ranges denied even when internet is allowed: RFC1918, RFC6598 CGNAT,
+    # link-local + cloud metadata, and IPv6 ULA/link-local. Must be non-empty. Add YOUR cluster's
+    # Service/Pod CIDRs too if they are carved from publicly-routable space (these defaults only
+    # cover ranges that are non-public by RFC).
+    privateCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 100.64.0.0/10
+      - 169.254.0.0/16
+      - fc00::/7
+      - fe80::/10
 
 # =============================================================================
 # boxy subchart (per-user nsjail sandbox runtime) — oci://ghcr.io/niradler/charts/boxy
@@ -201,10 +302,11 @@ boxy:
       # (use only for local dev / e2e). Keep empty for prod.
       staticToken: ""
       cacheTTLSeconds: 30
-    # SECURITY GUARDRAIL: default sandbox OFF. A tool call with no X-Sandbox-Id then returns a
-    # tool-error instead of silently routing to a SHARED default sandbox (cross-user risk).
-    # boxy 0.1.1 already defaults this off; pinned here so an upstream default change can't
-    # silently re-enable it.
+    # SECURITY GUARDRAIL: default sandbox OFF. A tool call with no routing headers then returns a
+    # tool-error instead of silently routing to a SHARED default sandbox (cross-user risk). corpbot
+    # always sends X-Session-Id + X-Sandbox-Id (and fails closed without a user id), so this only
+    # backstops a header-less request. boxy defaults this off; pinned here so an upstream default
+    # change can't silently re-enable it.
     defaultSandbox:
       enabled: false
 

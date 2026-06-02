@@ -1,18 +1,19 @@
 """nanobot Tool subclasses that route boxy's tools to a per-user sandbox (corpbot plugin).
 
-boxy routes every ``/mcp`` request to a per-user nsjail sandbox by the ``X-Sandbox-Id`` header.
-A single shared MCP session with a mutated header would race across concurrent users and could
-leak one user's sandbox to another. :class:`SandboxToolInvoker` avoids that by opening a
-**fresh, short-lived MCP connection per tool call**, in the caller's own asyncio task, whose
-header carries the current message's sandbox id. This is:
+boxy routes every ``/mcp`` request to a per-user nsjail sandbox by the ``X-Session-Id`` header
+(the user) plus the shared ``X-Sandbox-Id`` config id. A single shared MCP session with a mutated
+header would race across concurrent users and could leak one user's sandbox to another.
+:class:`SandboxToolInvoker` avoids that by opening a **fresh, short-lived MCP connection per tool
+call**, in the caller's own asyncio task, whose headers carry the current message's session id.
+This is:
 
 * concurrency-safe — no shared session or mutable header between users;
 * anyio-safe — each connection's task group is entered and exited in the same task;
 * fail-closed — a call with no sandbox id in context raises instead of routing to a wrong or
   default sandbox.
 
-boxy state persists server-side (keyed by ``X-Sandbox-Id``), so reconnecting per call reuses
-the same sandbox and refreshes its sliding TTL.
+boxy state persists server-side (keyed by ``X-Session-Id``), so reconnecting per call reuses
+the same per-user sandbox and refreshes its sliding TTL.
 
 The plugin **is** the boxy client: nanobot does not configure boxy as an ``mcpServers`` entry,
 so no nanobot MCP wrapper is involved.
@@ -31,6 +32,8 @@ boxy (which validates via TokenReview), so we never silently route with stale or
 """
 from __future__ import annotations
 
+import logging
+import math
 import os
 from typing import Any
 
@@ -38,11 +41,19 @@ import httpx
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.context import RequestContext
 
-from corpbot.routing import SANDBOX_HEADER, current_sandbox_id, set_current_sandbox_id
+from corpbot.routing import (
+    SANDBOX_HEADER,
+    SESSION_HEADER,
+    current_session_id,
+    sandbox_config_id,
+    set_current_session_id,
+)
 
 # Defaults match the in-cluster boxy-router service; override via env at deploy time.
 DEFAULT_BOXY_MCP_URL = "http://boxy-router.boxy.svc.cluster.local:8080/mcp"
 DEFAULT_TIMEOUT_SECONDS = 120.0
+
+_log = logging.getLogger("corpbot.tools")
 
 
 def _boxy_url() -> str:
@@ -59,9 +70,13 @@ def _resolve_token() -> str | None:
     token_file = os.environ.get("BOXY_ROUTER_TOKEN_FILE")
     if token_file:
         try:
-            token = open(token_file, encoding="utf-8").read().strip()
-        except OSError:
+            with open(token_file, encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError as exc:
+            _log.warning("boxy router token file %r unreadable: %s", token_file, exc)
             return None
+        if not token:
+            _log.warning("boxy router token file %r is empty", token_file)
         return token or None
     token = os.environ.get("BOXY_ROUTER_TOKEN")
     return token or None
@@ -79,13 +94,22 @@ def _timeout_seconds() -> float:
     if not raw:
         return DEFAULT_TIMEOUT_SECONDS
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
+        _log.warning("invalid BOXY_MCP_TIMEOUT_SECONDS %r; using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
         return DEFAULT_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        _log.warning("non-positive/invalid BOXY_MCP_TIMEOUT_SECONDS %r; using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
+        return DEFAULT_TIMEOUT_SECONDS
+    return value
 
 
 class SandboxRoutingError(RuntimeError):
     """Raised when a sandbox-routed tool is called with no sandbox id in context (fail closed)."""
+
+
+class BoxyToolError(RuntimeError):
+    """Raised when boxy returns a tool-level error result (``isError``)."""
 
 
 def _result_text(result: Any) -> str:
@@ -113,27 +137,28 @@ class SandboxToolInvoker:
         # Explicit override (e.g. tests pass {}); ``None`` means "resolve auth per call".
         self._base_headers = dict(base_headers) if base_headers is not None else None
 
-    def _headers_for(self, sandbox_id: str) -> dict[str, str]:
+    def _headers_for(self, session_id: str) -> dict[str, str]:
         base = self._base_headers if self._base_headers is not None else _auth_headers()
-        return {**base, SANDBOX_HEADER: sandbox_id}
+        return {**base, SESSION_HEADER: session_id, SANDBOX_HEADER: sandbox_config_id()}
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Connect with the current sandbox id, run the tool, and return result text.
+        """Connect with the current user's session id + the shared config id, run the tool, and
+        return result text.
 
-        Fails closed: if there is no sandbox id in the current context, raises
+        Fails closed: if there is no per-user session id in the current context, raises
         :class:`SandboxRoutingError` rather than routing an unrouted (or default) request.
         """
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        sandbox_id = current_sandbox_id()
-        if not sandbox_id:
+        session_id = current_session_id()
+        if not session_id:
             raise SandboxRoutingError(
-                "no sandbox id in context — refusing to route a boxy tool call (fail closed)"
+                "no session id in context — refusing to route a boxy tool call (fail closed)"
             )
 
         async with httpx.AsyncClient(
-            headers=self._headers_for(sandbox_id),
+            headers=self._headers_for(session_id),
             follow_redirects=True,
             timeout=_timeout_seconds(),
         ) as client:
@@ -142,11 +167,14 @@ class SandboxToolInvoker:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments=arguments)
-        return _result_text(result)
+        text = _result_text(result)
+        if getattr(result, "isError", False):
+            raise BoxyToolError(text or f"boxy tool {tool_name!r} returned an error")
+        return text
 
 
 # One shared invoker per process. It is stateless apart from the URL/base headers; the
-# per-user sandbox id is read from the contextvar at call time, so sharing is safe.
+# per-user session id is read from the contextvar at call time, so sharing is safe.
 _invoker = SandboxToolInvoker()
 
 
@@ -164,8 +192,8 @@ class _BoxyTool(Tool):
     _override_invoker: SandboxToolInvoker | None = None
 
     def set_context(self, ctx: RequestContext) -> None:
-        """nanobot calls this once per message; derive the sandbox id from the trusted chat id."""
-        set_current_sandbox_id(ctx.chat_id)
+        """nanobot calls this once per message; derive the per-user session id from the trusted chat id."""
+        set_current_session_id(ctx.chat_id)
 
     def _invoker_override(self, invoker: SandboxToolInvoker) -> None:
         """Point this tool instance at a specific invoker (used by tests)."""

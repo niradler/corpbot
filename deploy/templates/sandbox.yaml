@@ -1,0 +1,56 @@
+{{- if .Values.sandbox.enabled }}
+{{/*
+  Default per-user sandbox TEMPLATE, expressed as a real boxy `Sandbox` custom resource
+  (boxy.dev/v1alpha1). The boxy CRD describes a Sandbox as "a config template for creating
+  sessions" — so this object is THE customization surface for what every user's nsjail sandbox
+  looks like. Edit the `sandbox:` block in values.yaml and `helm upgrade`; do not hand-edit here.
+
+  Lifecycle: nanobot's plugin sends the trusted `X-Session-Id` (`u-<slack-id>`, the per-user key)
+  plus `X-Sandbox-Id` = this config's `sandboxId`. boxy provisions each user's session from THIS
+  shared config on first contact. This object provides the baseline shape for every user.
+
+  Customizable knobs (all surfaced in values.yaml `sandbox.*`, every field commented there):
+    - ttlSeconds          sliding idle TTL before the sandbox is reaped (<= boxy router cap)
+    - allowedBinaries     execution allowlist inside the jail
+    - env                 extra env vars (BOXY_/KUBERNETES_ prefixes are reserved/rejected)
+    - vm.{memoryMb,vcpus,workdir,shell,…}   jail resource shape (see the boxy Sandbox CRD)
+    - network.allowInternetAccess           per-sandbox internet flag
+
+  NETWORK NOTE: the jail's *effective* reachability is also governed by a Kubernetes
+  NetworkPolicy on boxy's controller pods (sandboxes share the controller netns) — see
+  templates/networkpolicy-sandbox.yaml and `sandbox.network.*`. Setting allowInternetAccess here
+  without opening controller egress yields no internet; the NetworkPolicy is the enforced lever.
+
+  The boxy RBAC this chart grants nanobot (sandboxes: get/list/create/update) plus the operator's
+  own reconcile rights cover managing this object.
+*/}}
+apiVersion: boxy.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: {{ include "corpbot.fullname" . }}-{{ .Values.sandbox.sandboxId }}
+  namespace: {{ include "corpbot.boxyNamespace" . }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+    # boxy resolves a Sandbox config by this label (lookupSandbox matches boxy.dev/sandbox-id AND
+    # spec.sandboxId). Without it the config CR is invisible to the router/operator.
+    boxy.dev/sandbox-id: {{ .Values.sandbox.sandboxId | quote }}
+  annotations:
+    # Keep the template across `helm uninstall` so in-flight sessions referencing it survive a
+    # chart removal/reinstall. Remove this annotation if you want uninstall to delete it.
+    "helm.sh/resource-policy": keep
+spec:
+  sandboxId: {{ .Values.sandbox.sandboxId | quote }}
+  ttlSeconds: {{ .Values.sandbox.ttlSeconds }}
+  allowedBinaries: {{ .Values.sandbox.allowedBinaries | toJson }}
+  {{- with .Values.sandbox.env }}
+  env:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  vm:
+    {{- toYaml .Values.sandbox.vm | nindent 4 }}
+  network:
+    enabled: true
+    # Per-sandbox internet flag. Effective egress is still bounded by the controller-pod
+    # NetworkPolicy (sandbox.network.* → templates/networkpolicy-sandbox.yaml).
+    allowInternetAccess: {{ .Values.sandbox.network.allowInternet }}
+{{- end }}

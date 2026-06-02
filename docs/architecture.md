@@ -10,15 +10,15 @@ process with outbound network access (for the LLM API). The sandbox is isolated.
   is implemented as a **thin nanobot plugin**, the published `corpbot` package. It registers
   boxy's tools (`bash`/`read_file`/`write_file`/`edit_file`) via the `nanobot.tools` entry
   point group; each tool is `ContextAware`, so nanobot sets the trusted per-message
-  `RequestContext` on it before the turn, and the plugin derives the sandbox id from
+  `RequestContext` on it before the turn, and the plugin derives the per-user session id from
   `chat_id`. **The plugin IS the boxy MCP client** — boxy is not configured as a nanobot
   `mcpServers` entry, so no nanobot MCP wrapper is involved. Configure via env `BOXY_MCP_URL`
   and `BOXY_ROUTER_TOKEN`. See `src/corpbot/` (`routing.py`, `tools.py`).
 - **Built-in tools off** — historically "A1" — is config only: set `tools.exec.enable=false`,
   `tools.web.enable=false`, `tools.file.enable=false`. The `file.enable` flag lands via
   upstream nanobot PR [HKUDS/nanobot#4138](https://github.com/HKUDS/nanobot/pull/4138).
-- **boxy** is consumed as a **pinned published Helm chart** (release with per-user routing,
-  [niradler/boxy#5](https://github.com/niradler/boxy/pull/5)) — not forked or vendored.
+- **boxy** is consumed as a **pinned published Helm chart** (release with per-user session
+  provisioning, [niradler/boxy#6](https://github.com/niradler/boxy/pull/6)) — not forked or vendored.
 - **S3 `/workspace` persistence is deferred** to a later milestone (see Persistence below).
 
 ## Flow
@@ -28,10 +28,12 @@ process with outbound network access (for the LLM API). The sandbox is isolated.
 2. nanobot sets the trusted per-message `RequestContext` on every `ContextAware` tool (the
    `corpbot` plugin's boxy tools) in that message's asyncio task, before the turn runs.
 3. When the model calls a boxy tool, the plugin opens a fresh boxy `/mcp` connection for that
-   call carrying `X-Sandbox-Id: u-<sanitized-slack-user-id>`, derived from the **trusted
-   per-message `chat_id`** — never from tool arguments.
-4. boxy-router sees an **unknown sandbox id** → provisions one from a template →
-   `setupScript` restores `/workspace` from `s3://<bucket>/u-<user>/`.
+   call carrying two headers: `X-Session-Id: u-<sanitized-slack-user-id>` (the per-user key,
+   derived from the **trusted per-message `chat_id`** — never from tool arguments) and
+   `X-Sandbox-Id: <config id>` (the shared `Sandbox` config, a deploy-time value).
+4. boxy-router finds no session for that user yet → provisions one bound to the named config
+   (the shared `Sandbox` CR) → `setupScript` restores `/workspace` from `s3://<bucket>/u-<user>/`.
+   Later calls reuse the running session.
 5. Tool calls run in the jail. **Each exec refreshes the sliding 1h TTL.**
 6. After **1h idle** the sandbox expires → `teardownScript` syncs `/workspace` back to S3 →
    the sandbox is reaped.
@@ -45,9 +47,9 @@ Slack          nanobot                         boxy-router            sandbox (n
   │   chat_id =   │                                  │                       │                 │
   │   slack uid   │  agent loop → first tool call    │                       │                 │
   │               ├─ MCP connect /mcp ──────────────►│                       │                 │
-  │               │  X-Sandbox-Id: u-<uid>           │                       │                 │
-  │               │                                  │  unknown id?          │                 │
-  │               │                                  ├─ provision from template               │
+  │               │  X-Session-Id: u-<uid>           │                       │                 │
+  │               │  X-Sandbox-Id: <config>          │  no session yet?      │                 │
+  │               │                                  ├─ provision from config CR              │
   │               │                                  ├─ setupScript: s3 restore ──────────────►│
   │               │                                  │                       │◄── /workspace ──┤
   │               │  tool result                     │  exec in jail ───────►│                 │
@@ -61,43 +63,46 @@ Slack          nanobot                         boxy-router            sandbox (n
 
 ## Identity & security model
 
-- **Routing key** is `u-<sanitized-slack-user-id>`, carried as the `X-Sandbox-Id` header.
+- **Routing key** is `u-<sanitized-slack-user-id>`, carried as the `X-Session-Id` header (the
+  per-user runtime key). The `X-Sandbox-Id` header carries the shared `Sandbox` **config** id —
+  a deploy-time value, never derived from the user.
 - **Derivation:** the Slack user id comes from the per-message **`RequestContext.chat_id`**
   that nanobot trusts. The `corpbot` plugin reads it in `set_context` (called by nanobot per
-  message), stores the sanitized id in a `contextvar`, and injects it on the `X-Sandbox-Id`
-  header of every boxy MCP call. Each inbound message is its own asyncio task, so the
-  `contextvar` is concurrency-safe across users.
+  message), stores the sanitized session id in a `contextvar`, and injects it on the
+  `X-Session-Id` header of every boxy MCP call. Each inbound message is its own asyncio task, so
+  the `contextvar` is concurrency-safe across users.
 - **It must never come from the LLM or from tool arguments.** Letting the model choose the
-  sandbox id would be a confused-deputy vulnerability (one user reading another's workspace).
-- **Sanitization** (`sanitize_sandbox_id(chat_id)`): lowercase, keep only `[a-z0-9-]`, prefix
-  `u-`, cap at 55 chars so the derived `<id>-session` stays ≤63 (k8s RFC1123 label). Slack ids
-  are uppercase, so lowercasing matters.
+  session id would be a confused-deputy vulnerability (one user reading another's workspace).
+- **Sanitization** (`sanitize_session_id(chat_id)`): lowercase, keep only `[a-z0-9-]`, prefix
+  `u-`, cap at 63 chars (boxy uses `X-Session-Id` verbatim as the k8s RFC1123 label-backed
+  Session name). Slack ids are uppercase, so lowercasing matters.
 - **Path confinement:** boxy's file tools confine every path to `/workspace` and reject `..`,
   absolute escapes, and symlinks that point outside the workspace.
-- **Fail closed, both sides:** nanobot refuses to call boxy without a trusted id
-  (`SandboxRoutingError`). boxy does **not** validate the MCP `X-Sandbox-Id` header and would
-  route a missing id to a shared **default sandbox** if one is enabled — so the deploy
-  **disables boxy's default sandbox** (`defaultSandbox.enabled: false`). A missing id then
-  yields a tool-error, never a shared sandbox.
-- **Id hygiene is the client's job:** since boxy doesn't validate the header, nanobot
-  sanitizes to boxy's contract (`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, ≤55 chars so the derived
-  `<id>-session` stays ≤63).
+- **Fail closed, both sides:** nanobot refuses to call boxy without a trusted session id
+  (`SandboxRoutingError`), so it never routes an unidentified user. The deploy also **disables
+  boxy's default sandbox** (`defaultSandbox.enabled: false`), so a request with no headers at all
+  yields a tool-error rather than touching a shared sandbox. Config selection is explicit: the
+  named `Sandbox` config CR must exist (boxy never auto-creates one).
+- **Id hygiene is the client's job:** boxy validates the `X-Session-Id` format on session create
+  but does not sanitize it, so nanobot pre-sanitizes to boxy's contract
+  (`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, ≤63 chars).
 
 ## Sandbox lifecycle
 
 | Phase | Trigger | What happens |
 |-------|---------|--------------|
-| Provision | `/mcp` request with an unknown `X-Sandbox-Id` | Create sandbox from template with a fresh `/workspace`. _(Deferred: `setupScript` S3 restore.)_ |
+| Provision | `/mcp` request with a new `X-Session-Id` (bound to the `X-Sandbox-Id` config) | Create the per-user session from the shared config CR with a fresh `/workspace`. _(Deferred: `setupScript` S3 restore.)_ |
 | Active | Each exec / tool call | Sliding TTL refreshed to 1h. |
 | Expire | 1h idle | Sandbox reaped. _(Deferred: `teardownScript` syncs `/workspace` → S3 first.)_ |
 
-Sandbox template (lives in `deploy/` as a ConfigMap; consumed by boxy):
+Sandbox config (rendered as a boxy `Sandbox` CR — `deploy/templates/sandbox.yaml`; one shared
+config, every per-user session is built from it):
 
 ```json
 {
   "ttlSeconds": 3600,
   "network": { "enabled": true, "allowInternetAccess": false },
-  "allowedBinaries": ["bash", "python3", "node", "git"],
+  "allowedBinaries": [],
   "vm": {
     "memoryMb": 512,
     "rlimits": [
@@ -111,7 +116,10 @@ Sandbox template (lives in `deploy/` as a ConfigMap; consumed by boxy):
 }
 ```
 
-`sandboxId` = the incoming `X-Sandbox-Id`. TTL is **sliding** (refreshed per exec).
+`sandboxId` = the shared config id (`X-Sandbox-Id`); the per-user `Session` is keyed by
+`X-Session-Id`. `allowedBinaries` lists **only** extra binaries baked into the controller image
+at `/usr/local/bin` (the rootfs already provides bash/coreutils) — empty by default; see
+`deploy/values.yaml` `sandbox.allowedBinaries`. TTL is **sliding** (refreshed per exec).
 
 ## Persistence
 

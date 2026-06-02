@@ -1,0 +1,68 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.network.allowInternet .Values.sandbox.network.restrictToPublicInternet }}
+{{/*
+  Sandbox egress guardrail: "internet YES, internal services NO".
+
+  WHY THIS EXISTS: boxy runs each user's nsjail sandbox INSIDE the boxy controller pod's network
+  namespace. boxy's own internet switch (boxy.controller.networkPolicy.allowInternetEgress=true)
+  is all-or-nothing — it emits an `egress: [{}]` rule that lets the sandbox reach EVERYTHING,
+  including cluster-internal Services, other pods, the Kubernetes API, and the cloud metadata
+  endpoint (169.254.169.254). That is a lateral-movement / SSRF risk.
+
+  Instead, keep boxy.controller.networkPolicy.allowInternetEgress=false (so boxy does NOT emit
+  the blunt allow-all) and let THIS policy grant egress to the public internet while EXCLUDING the
+  private ranges. NetworkPolicies are additive (the union of all egress rules selecting a pod
+  applies), so this combines with boxy's base policy (DNS + router) to yield exactly:
+  DNS + boxy-router + public-internet-minus-internal.
+
+  Targets the same controller pods boxy's own policy selects (boxy.dev/controller=true).
+*/}}
+{{- $v4 := list -}}
+{{- $v6 := list -}}
+{{- range $c := .Values.sandbox.network.privateCidrs -}}
+  {{- if contains ":" $c }}{{- $v6 = append $v6 $c }}{{- else }}{{- $v4 = append $v4 $c }}{{- end -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "corpbot.fullname" . }}-sandbox-public-egress
+  namespace: {{ include "corpbot.boxyNamespace" . }}
+  labels:
+    {{- include "corpbot.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      boxy.dev/managed-by: boxy
+      boxy.dev/controller: "true"
+  # Egress only — we widen egress; ingress stays governed by boxy's own sandbox policy.
+  policyTypes:
+    - Egress
+  egress:
+    # DNS, scoped to the cluster DNS namespace (sandbox.network.dnsNamespace).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.sandbox.network.dnsNamespace | default "kube-system" }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Public internet (IPv4): everything EXCEPT the private/internal ranges below.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $v4 }}
+              - {{ . | quote }}
+              {{- end }}
+    {{- if $v6 }}
+    # Public internet (IPv6): a separate block (except entries must fall within their cidr).
+    - to:
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              {{- range $v6 }}
+              - {{ . | quote }}
+              {{- end }}
+    {{- end }}
+{{- end }}

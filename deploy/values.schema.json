@@ -40,11 +40,12 @@
         },
         "provider": {
           "type": "object",
-          "required": ["name", "model", "apiKeyEnv"],
+          "required": ["name", "model"],
           "properties": {
             "name": { "type": "string", "minLength": 1 },
             "model": { "type": "string", "minLength": 1 },
-            "apiKeyEnv": { "type": "string", "minLength": 1 }
+            "apiBase": { "type": "string" },
+            "apiKeyEnv": { "type": "string" }
           }
         },
         "boxyClient": {
@@ -105,7 +106,37 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "llmEgressCidrs": { "type": "array", "items": { "type": "string" } },
+        "llmEgressPorts": { "type": "array", "items": { "type": "integer" } },
         "dnsPorts": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "sandboxId": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" },
+        "ttlSeconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
+        "allowedBinaries": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "object" },
+        "vm": {
+          "type": "object",
+          "properties": {
+            "memoryMb": { "type": "integer", "minimum": 64, "maximum": 65536 },
+            "vcpus": { "type": "integer", "minimum": 1, "maximum": 64 },
+            "workdir": { "type": "string" },
+            "shell": { "type": "string" }
+          }
+        },
+        "network": {
+          "type": "object",
+          "properties": {
+            "allowInternet": { "type": "boolean" },
+            "restrictToPublicInternet": { "type": "boolean" },
+            "dnsNamespace": { "type": "string", "minLength": 1 },
+            "privateCidrs": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          }
+        }
       }
     },
     "boxy": {
@@ -116,5 +147,5 @@
       }
     }
   },
-  "required": ["nanobot", "serviceAccount", "rbac", "secrets", "networkPolicy", "boxy"]
+  "required": ["nanobot", "serviceAccount", "rbac", "secrets", "networkPolicy", "sandbox", "boxy"]
 }
