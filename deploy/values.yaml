@@ -267,14 +267,15 @@ sandbox:
     # Namespace the cluster DNS (kube-dns/CoreDNS) runs in; sandbox DNS egress is scoped to it.
     dnsNamespace: kube-system
 
-    # Ranges considered "internal" and denied even when internet is allowed. Covers RFC1918,
-    # link-local + cloud metadata, and IPv6 ULA/link-local. Must be non-empty. This list cannot be
-    # universally complete — add YOUR cluster's Service/Pod CIDRs if they fall outside these
-    # (e.g. a 100.64.0.0/10 CGNAT pod range on some managed clusters).
+    # Non-publicly-routable ranges denied even when internet is allowed: RFC1918, RFC6598 CGNAT,
+    # link-local + cloud metadata, and IPv6 ULA/link-local. Must be non-empty. Add YOUR cluster's
+    # Service/Pod CIDRs too if they are carved from publicly-routable space (these defaults only
+    # cover ranges that are non-public by RFC).
     privateCidrs:
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
+      - 100.64.0.0/10
       - 169.254.0.0/16
       - fc00::/7
       - fe80::/10
