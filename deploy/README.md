@@ -21,10 +21,11 @@ deploy/
     ├── serviceaccount.yaml          # nanobot SA (projected token)
     ├── rbac.yaml                    # Role+RoleBinding: boxy.dev sandboxes/sessions [get,list,create,update]
     ├── configmap-nanobot.yaml       # ~/.nanobot/config.json (tools off; slack socket mode; allowFrom)
-    ├── configmap-sandbox-template.yaml  # per-user sandbox template (ephemeral /workspace; no S3 in v1)
+    ├── sandbox.yaml                 # boxy Sandbox CONFIG CR (the shared shape; ephemeral /workspace, no S3 in v1)
     ├── secret.yaml                  # only when secrets.create=true (dev); else existingSecret
-    ├── deployment-nanobot.yaml      # nanobot+plugin Deployment (hardened)
+    ├── deployment-nanobot.yaml      # nanobot+plugin Deployment (hardened; sets BOXY_SESSION_SCOPE)
     ├── networkpolicy.yaml           # default-deny + egress to boxy/DNS/LLM/Slack
+    ├── networkpolicy-sandbox.yaml   # sandbox egress policy (internet-but-no-internal, when enabled)
     └── NOTES.txt
 ```
 
@@ -32,9 +33,9 @@ deploy/
 
 - Kubernetes cluster + `kubectl`, Helm v3.8+ (OCI support; tested with v4).
 - The **boxy chart must be published** at `oci://ghcr.io/niradler/charts/boxy` at the version
-  pinned in `Chart.yaml` (currently `0.1.1`, which includes per-user routing, niradler/boxy #5).
-  It **is** published, so `helm dependency build deploy/` works. If you ever need to install
-  boxy separately, render corpbot alone with `--set boxy.enabled=false`.
+  pinned in `Chart.yaml` (currently `0.1.3`, which includes per-user session provisioning,
+  niradler/boxy #6). It **is** published, so `helm dependency build deploy/` works. If you ever
+  need to install boxy separately, render corpbot alone with `--set boxy.enabled=false`.
 - The **nanobot image** (`nanobot-ai` + corpbot plugin) built and pushed to a registry — see
   [Building the image](#building-the-nanobot-image). Until you push it, set
   `nanobot.image.repository`/`tag` to your image.
@@ -90,6 +91,26 @@ Fallback: set `nanobot.boxyClient.auth: static` and `boxy.router.auth.staticToke
 bearer via the secret key `BOXY_ROUTER_TOKEN`. This is weaker (a long-lived shared secret) — use
 only for local dev / e2e.
 
+## Sandbox sharing scope (per-user / per-channel)
+
+`sandbox.sessionScope` controls who shares a sandbox. **DMs are always per-user** (a DM is 1:1);
+the value only affects **channel** messages:
+
+- `per-user` (**default**) — every member of a channel gets their own sandbox; nobody can read
+  another member's `/workspace`. Matches the "one sandbox per user" model and is the safe default.
+- `per-channel` — all members of a channel share one sandbox (keyed by the channel id). Use for a
+  team workspace where shared files/state in the channel are intended.
+
+```bash
+# Default is per-user. To share one sandbox per channel (DMs stay per-user):
+helm upgrade corpbot deploy/ -n corpbot --reuse-values \
+  --set sandbox.sessionScope=per-channel
+```
+
+This renders `BOXY_SESSION_SCOPE` on the nanobot pod; the plugin re-reads it per message, so an
+upgrade takes effect without a manual restart. The session id is always derived from **trusted**
+per-message identity (the Slack user id / channel id), never from the model or tool arguments.
+
 ## Security posture
 
 - **Non-root, hardened pod**: `runAsNonRoot`, uid/gid/fsGroup `10001`, `readOnlyRootFilesystem`,
@@ -130,13 +151,13 @@ helm template corpbot deploy/ -n corpbot                            # full umbre
 
 ## Notes / TODOs
 
-- **Sandbox template ConfigMap** (`configmap-sandbox-template.yaml`) documents the intended
-  per-user sandbox shape, but **boxy 0.1.1 does not expose a `sandboxTemplate.fromConfigMap`**
-  value — the router builds the per-user sandbox from the inbound request and chart defaults. The
-  ConfigMap is a no-op until boxy supports sourcing a template from a ConfigMap. _(TODO: wire it
-  when boxy adds support.)_
-- **Projected token audience** defaults to `https://kubernetes.default.svc` (the API server's
-  default audience, which boxy's TokenReview accepts). Override `nanobot.boxyClient.tokenAudience`
-  if your cluster uses a different identifier.
+- **Sandbox config CR** (`templates/sandbox.yaml`) renders a real boxy `Sandbox` **config** CR
+  (the shared shape), labelled `boxy.dev/sandbox-id: <sandboxId>` so boxy 0.1.3's router/operator
+  resolve it. Every user's session is provisioned from this one config — there is no CR per user.
+  Customize it via the `sandbox.*` values (binaries, vm, network, TTL).
+- **Projected token audience** defaults to the FQDN `https://kubernetes.default.svc.cluster.local`
+  — the API server's default `--api-audiences` on kubeadm/kind and most managed clusters, which
+  boxy's TokenReview validates against. Override `nanobot.boxyClient.tokenAudience` if your
+  cluster's `--api-audiences` differs.
 - **S3 `/workspace` persistence is deferred** — v1 sandboxes use an ephemeral per-sandbox
   `/workspace` (see `docs/architecture.md`).
