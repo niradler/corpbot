@@ -14,7 +14,13 @@ import re
 import pytest
 
 import boxy_mock
-from corpbot.routing import _reset_for_tests, sanitize_session_id, set_current_session_id
+from corpbot.routing import (
+    _reset_for_tests,
+    resolve_session_id,
+    sanitize_session_id,
+    session_scope,
+    set_current_session_id,
+)
 from corpbot.tools import (
     BashTool,
     BoxyToolError,
@@ -36,6 +42,24 @@ def mock_boxy():
 
 def _ctx(uid: str) -> RequestContext:
     return RequestContext(channel="slack", chat_id=uid)
+
+
+def _dm_ctx(user_id: str, dm_channel: str = "D-DM") -> RequestContext:
+    """A Slack DM: chat_id is the DM channel, the user id rides in slack metadata."""
+    return RequestContext(
+        channel="slack",
+        chat_id=dm_channel,
+        metadata={"slack": {"channel_type": "im", "event": {"user": user_id}}},
+    )
+
+
+def _channel_ctx(user_id: str, channel_id: str = "C-CHAN") -> RequestContext:
+    """A Slack channel message: chat_id is the (shared) channel, user id in slack metadata."""
+    return RequestContext(
+        channel="slack",
+        chat_id=channel_id,
+        metadata={"slack": {"channel_type": "channel", "event": {"user": user_id}}},
+    )
 
 
 def _invoker(mock_boxy) -> SandboxToolInvoker:
@@ -156,6 +180,77 @@ def test_boxy_tool_error_raises_not_silently_returned(mock_boxy):
     with pytest.raises(BoxyToolError):
         asyncio.run(scenario())
     _reset_for_tests()
+
+
+def test_dm_is_always_per_user(mock_boxy, monkeypatch):
+    # A DM keys on the USER id, not the DM channel id — even under per-channel scope.
+    monkeypatch.setenv("BOXY_SESSION_SCOPE", "per-channel")
+
+    async def scenario(uid: str, dm: str) -> str:
+        invoker = _invoker(mock_boxy)
+        tool = BashTool()
+        tool._invoker_override(invoker)
+        tool.set_context(_dm_ctx(uid, dm))
+        return await tool.execute(command="echo hi")
+
+    _reset_for_tests()
+    s_alice, _ = _split(asyncio.run(scenario("U07ALICE", "D-ALICE")))
+    s_bob, _ = _split(asyncio.run(scenario("U07BOB", "D-BOB")))
+    assert s_alice == "u-u07alice"
+    assert s_bob == "u-u07bob"
+    _reset_for_tests()
+
+
+def test_channel_default_scope_isolates_users(mock_boxy):
+    # Default (per-user): two users in the SAME channel get DIFFERENT, user-keyed sessions.
+    async def call(uid: str) -> str:
+        invoker = _invoker(mock_boxy)
+        tool = BashTool()
+        tool._invoker_override(invoker)
+        tool.set_context(_channel_ctx(uid, "C-SHARED"))
+        return await tool.execute(command="id")
+
+    _reset_for_tests()
+    a, _ = _split(asyncio.run(call("U07ALICE")))
+    b, _ = _split(asyncio.run(call("U07BOB")))
+    assert a == "u-u07alice"
+    assert b == "u-u07bob"
+    assert a != b
+    _reset_for_tests()
+
+
+def test_channel_per_channel_scope_shares_sandbox(mock_boxy, monkeypatch):
+    # per-channel: two users in the same channel share ONE session keyed by the channel id.
+    monkeypatch.setenv("BOXY_SESSION_SCOPE", "per-channel")
+
+    async def call(uid: str) -> str:
+        invoker = _invoker(mock_boxy)
+        tool = BashTool()
+        tool._invoker_override(invoker)
+        tool.set_context(_channel_ctx(uid, "C-SHARED"))
+        return await tool.execute(command="id")
+
+    _reset_for_tests()
+    a, _ = _split(asyncio.run(call("U07ALICE")))
+    b, _ = _split(asyncio.run(call("U07BOB")))
+    assert a == b == "u-c-shared"
+    _reset_for_tests()
+
+
+def test_session_scope_env_and_resolution(monkeypatch):
+    monkeypatch.delenv("BOXY_SESSION_SCOPE", raising=False)
+    assert session_scope() == "per-user"  # secure default
+    monkeypatch.setenv("BOXY_SESSION_SCOPE", "bogus")
+    assert session_scope() == "per-user"  # unknown -> default
+    monkeypatch.setenv("BOXY_SESSION_SCOPE", "per-channel")
+    assert session_scope() == "per-channel"
+    # DM always per-user regardless of scope; channel follows scope.
+    assert resolve_session_id("U07ALICE", "C-CHAN", is_dm=True) == "u-u07alice"
+    assert resolve_session_id("U07ALICE", "C-CHAN", is_dm=False) == "u-c-chan"
+    monkeypatch.setenv("BOXY_SESSION_SCOPE", "per-user")
+    assert resolve_session_id("U07ALICE", "C-CHAN", is_dm=False) == "u-u07alice"
+    # Fail closed when no usable id at all.
+    assert resolve_session_id(None, None, is_dm=True) is None
 
 
 def test_sanitize_matches_boxy_contract():

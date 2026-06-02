@@ -221,6 +221,13 @@ sandbox:
   # ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$). "default" is the conventional template id.
   sandboxId: "default"
 
+  # Who shares a sandbox for CHANNEL messages. DMs are ALWAYS per-user (a DM is 1:1).
+  #   per-user    (DEFAULT) — every member of a channel gets their OWN sandbox; the isolating,
+  #               secure default that matches the "one sandbox per user" design.
+  #   per-channel — all members of a channel SHARE one sandbox (keyed by the channel id). Use for a
+  #               team workspace where shared files/state in the channel are intended.
+  sessionScope: "per-user"
+
   # Sliding TTL: a sandbox is reaped after this many idle seconds (refreshed on each exec).
   # Must be <= boxy.router.maxSandboxTTLSeconds. 3600 = 1h (matches docs/architecture.md).
   ttlSeconds: 3600

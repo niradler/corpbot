@@ -116,6 +116,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "sandboxId": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" },
+        "sessionScope": { "type": "string", "enum": ["per-user", "per-channel"] },
         "ttlSeconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
         "allowedBinaries": { "type": "array", "items": { "type": "string" } },
         "env": { "type": "object" },

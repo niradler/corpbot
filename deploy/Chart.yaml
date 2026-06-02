@@ -8,17 +8,17 @@ description: >-
 type: application
 
 # Chart version — bump on chart changes. appVersion tracks the corpbot plugin release.
-version: 0.2.1
-appVersion: "0.1.1"
+version: 0.2.3
+appVersion: "0.1.2"
 
 dependencies:
   # boxy is an EXTERNAL dependency consumed from its published chart — never forked or vendored.
-  # Per-user session provisioning (two-header X-Session-Id + X-Sandbox-Id), the subchart-safe mTLS
-  # secret names, and CRDs-in-crds/ land in niradler/boxy PR #6 (chart 0.1.3). Bump to that version
-  # once it is published — 0.1.1 lacks the provisioning path and per-user routing will fail.
+  # 0.1.3 carries per-user session provisioning (two-header X-Session-Id + X-Sandbox-Id), the
+  # subchart-safe mTLS secret names, and CRDs-in-crds/ (niradler/boxy PR #6, now published).
+  # 0.1.1 lacked the provisioning path and per-user routing failed.
   # Gate with boxy.enabled so corpbot's own templates render/install standalone.
   - name: boxy
-    version: "0.1.1"
+    version: "0.1.3"
     repository: "oci://ghcr.io/niradler/charts"
     alias: boxy
     condition: boxy.enabled
