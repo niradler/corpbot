@@ -82,9 +82,13 @@ nanobot:
     #     with TokenReview + SubjectAccessReview against the nanobot SA's boxy.dev RBAC.
     #   static: fall back to a BOXY_ROUTER_TOKEN secret key (matches boxy router.auth.staticToken).
     auth: projected
-    # Audience for the projected token. boxy validates with the API server's default audience,
-    # so the cluster's API server identifier is the safe choice. Override to match your cluster.
-    tokenAudience: "https://kubernetes.default.svc"
+    # Audience for the projected token. boxy's router runs TokenReview WITHOUT an explicit
+    # audience, so the API server validates the token against its OWN default audience
+    # (--api-audiences, which defaults to the service-account issuer). On kubeadm/kind and the
+    # major managed clusters that issuer is "https://kubernetes.default.svc.cluster.local", so a
+    # token minted for the shorter "https://kubernetes.default.svc" is rejected 401. Use the
+    # fully-qualified default; override only if your cluster's --api-audiences differs.
+    tokenAudience: "https://kubernetes.default.svc.cluster.local"
     # Mount path for the projected token (must be on a writable/standard volume; read-only is fine).
     tokenMountPath: /var/run/secrets/boxy/token
     expirationSeconds: 3600
