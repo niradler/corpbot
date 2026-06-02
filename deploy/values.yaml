@@ -30,11 +30,11 @@ nanobot:
   replicaCount: 1
 
   image:
-    # TODO: build deploy/docker/Dockerfile.nanobot and PUSH it to a registry you control,
-    # then set repository/tag here. This image bundles BOTH `nanobot-ai` AND the corpbot plugin.
-    # Until pushed, this reference will fail to pull — there is no published corpbot image yet.
-    repository: ghcr.io/niradler/corpbot-nanobot
-    tag: "0.1.0"
+    # Published image bundling BOTH `nanobot-ai` AND the corpbot plugin (built from
+    # deploy/docker/Dockerfile.nanobot). To run your own build, push to a registry you control and
+    # override repository/tag (or via --set). Tag tracks the chart appVersion (the plugin release).
+    repository: ghcr.io/niradler/corpbot
+    tag: "0.1.2"
     pullPolicy: IfNotPresent
 
   # The nanobot gateway serves channels (Slack socket mode) + an HTTP /health endpoint.

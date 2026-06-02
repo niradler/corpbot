@@ -107,16 +107,16 @@ Because corpbot is installed, its boxy tools are auto-discovered — you do **no
 
 ### 4. Deploy
 
-The [`deploy/`](./deploy) umbrella Helm chart brings up the whole platform — boxy + nanobot (with the corpbot plugin) + supporting resources — in one install (boxy is a pinned subchart). See [`deploy/README.md`](./deploy/README.md) for details, the secret recipe, and the security posture.
+The [`deploy/`](./deploy) umbrella Helm chart brings up the whole platform — boxy + nanobot (with the corpbot plugin) + supporting resources — in one install (boxy is a pinned subchart). Both the chart and the nanobot+plugin image are **published**, so a stock install needs no local build. See [`deploy/README.md`](./deploy/README.md) for details, the secret recipe, the security posture, and [production configuration](./deploy/README.md#production-configuration).
 
 ```bash
-helm dependency build deploy/
-helm install corpbot deploy/ -n corpbot --create-namespace \
+# From the published umbrella chart (pulls the boxy subchart + nanobot image automatically):
+helm install corpbot oci://ghcr.io/niradler/charts/corpbot -n corpbot --create-namespace \
   --set secrets.existingSecret=corpbot-secrets
 ```
 
 > [!IMPORTANT]
-> The chart pins a boxy release that includes per-user session provisioning ([niradler/boxy#6](https://github.com/niradler/boxy/pull/6)) and keeps boxy's default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox. Build and push the nanobot+plugin image ([`deploy/docker/Dockerfile.nanobot`](./deploy/docker/Dockerfile.nanobot)) and point `nanobot.image` at it first.
+> The chart pins a boxy release with per-user session provisioning ([niradler/boxy#6](https://github.com/niradler/boxy/pull/6)) and keeps boxy's default sandbox **disabled** so a missing id fails closed instead of touching a shared sandbox. The default `nanobot.image` is the published `ghcr.io/niradler/corpbot`; override it only to run your own build ([`deploy/docker/Dockerfile.nanobot`](./deploy/docker/Dockerfile.nanobot)).
 
 ### Per-user vs per-channel sandboxes
 

@@ -6,10 +6,10 @@
 # `nanobot.tools` entry point and injects X-Sandbox-Id per message). Multi-stage, slim,
 # non-root. Build from the repo root so the build context contains pyproject.toml + src/.
 #
-# Build & tag (run from the repo root):
-#   docker build -f deploy/docker/Dockerfile.nanobot -t ghcr.io/niradler/corpbot-nanobot:0.1.0 .
-# Push (TODO: replace with a registry you control, then update nanobot.image in values.yaml):
-#   docker push ghcr.io/niradler/corpbot-nanobot:0.1.0
+# Build & tag (run from the repo root); tag tracks the chart appVersion (the plugin release):
+#   docker build -f deploy/docker/Dockerfile.nanobot -t ghcr.io/niradler/corpbot:0.1.2 .
+# Push (override nanobot.image in values.yaml if you publish to a registry you control):
+#   docker push ghcr.io/niradler/corpbot:0.1.2
 # -----------------------------------------------------------------------------
 
 # --- builder: install into a venv we can copy to the runtime stage ----------
