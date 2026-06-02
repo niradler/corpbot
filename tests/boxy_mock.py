@@ -44,6 +44,10 @@ def build_app():
     async def edit_file(path: str, old_string: str, new_string: str, ctx: Context) -> str:
         return _seen(ctx)
 
+    @mcp.tool(description="Always errors — exercises the boxy tool-level error (isError) path.")
+    async def boom(ctx: Context) -> str:
+        raise RuntimeError("simulated boxy tool failure")
+
     return mcp.streamable_http_app()
 
 

@@ -32,6 +32,8 @@ boxy (which validates via TokenReview), so we never silently route with stale or
 """
 from __future__ import annotations
 
+import logging
+import math
 import os
 from typing import Any
 
@@ -51,6 +53,8 @@ from corpbot.routing import (
 DEFAULT_BOXY_MCP_URL = "http://boxy-router.boxy.svc.cluster.local:8080/mcp"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
+_log = logging.getLogger("corpbot.tools")
+
 
 def _boxy_url() -> str:
     return os.environ.get("BOXY_MCP_URL", DEFAULT_BOXY_MCP_URL)
@@ -66,9 +70,13 @@ def _resolve_token() -> str | None:
     token_file = os.environ.get("BOXY_ROUTER_TOKEN_FILE")
     if token_file:
         try:
-            token = open(token_file, encoding="utf-8").read().strip()
-        except OSError:
+            with open(token_file, encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError as exc:
+            _log.warning("boxy router token file %r unreadable: %s", token_file, exc)
             return None
+        if not token:
+            _log.warning("boxy router token file %r is empty", token_file)
         return token or None
     token = os.environ.get("BOXY_ROUTER_TOKEN")
     return token or None
@@ -86,13 +94,22 @@ def _timeout_seconds() -> float:
     if not raw:
         return DEFAULT_TIMEOUT_SECONDS
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
+        _log.warning("invalid BOXY_MCP_TIMEOUT_SECONDS %r; using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
         return DEFAULT_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        _log.warning("non-positive/invalid BOXY_MCP_TIMEOUT_SECONDS %r; using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
+        return DEFAULT_TIMEOUT_SECONDS
+    return value
 
 
 class SandboxRoutingError(RuntimeError):
     """Raised when a sandbox-routed tool is called with no sandbox id in context (fail closed)."""
+
+
+class BoxyToolError(RuntimeError):
+    """Raised when boxy returns a tool-level error result (``isError``)."""
 
 
 def _result_text(result: Any) -> str:
@@ -150,7 +167,10 @@ class SandboxToolInvoker:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments=arguments)
-        return _result_text(result)
+        text = _result_text(result)
+        if getattr(result, "isError", False):
+            raise BoxyToolError(text or f"boxy tool {tool_name!r} returned an error")
+        return text
 
 
 # One shared invoker per process. It is stateless apart from the URL/base headers; the

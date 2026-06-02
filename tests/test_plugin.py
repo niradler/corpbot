@@ -14,9 +14,10 @@ import re
 import pytest
 
 import boxy_mock
-from corpbot.routing import _reset_for_tests, sanitize_session_id
+from corpbot.routing import _reset_for_tests, sanitize_session_id, set_current_session_id
 from corpbot.tools import (
     BashTool,
+    BoxyToolError,
     EditFileTool,
     ReadFileTool,
     SandboxRoutingError,
@@ -139,6 +140,20 @@ def test_fails_closed_without_context(mock_boxy):
 
     _reset_for_tests()
     with pytest.raises(SandboxRoutingError):
+        asyncio.run(scenario())
+    _reset_for_tests()
+
+
+def test_boxy_tool_error_raises_not_silently_returned(mock_boxy):
+    # A boxy tool-level error (isError) must surface as an exception, NOT be returned as a
+    # successful result string (which the agent could mistake for real output).
+    async def scenario():
+        invoker = _invoker(mock_boxy)
+        set_current_session_id("UALICE")
+        return await invoker.call_tool("boom", {})
+
+    _reset_for_tests()
+    with pytest.raises(BoxyToolError):
         asyncio.run(scenario())
     _reset_for_tests()
 

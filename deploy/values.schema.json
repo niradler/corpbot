@@ -133,7 +133,8 @@
           "properties": {
             "allowInternet": { "type": "boolean" },
             "restrictToPublicInternet": { "type": "boolean" },
-            "privateCidrs": { "type": "array", "items": { "type": "string" } }
+            "dnsNamespace": { "type": "string", "minLength": 1 },
+            "privateCidrs": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
           }
         }
       }

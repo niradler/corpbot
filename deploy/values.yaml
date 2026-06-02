@@ -264,13 +264,18 @@ sandbox:
     # gets the blunt all-egress; combine with boxy.controller.networkPolicy.allowInternetEgress).
     restrictToPublicInternet: true
 
+    # Namespace the cluster DNS (kube-dns/CoreDNS) runs in; sandbox DNS egress is scoped to it.
+    dnsNamespace: kube-system
+
     # Ranges considered "internal" and denied even when internet is allowed. Covers RFC1918,
-    # link-local + cloud metadata, and IPv6 ULA/link-local. Add your cluster's Service/Pod CIDRs
-    # if they fall outside these (e.g. a 100.64.0.0/10 CGNAT pod range).
+    # CGNAT (common managed-cluster pod range), link-local + cloud metadata, and IPv6 ULA/link-local.
+    # Must be non-empty (an empty list would make the egress guardrail allow everything). Add your
+    # cluster's Service/Pod CIDRs if they fall outside these.
     privateCidrs:
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
+      - 100.64.0.0/10
       - 169.254.0.0/16
       - fc00::/7
       - fe80::/10

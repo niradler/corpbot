@@ -37,9 +37,12 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # DNS (needed to resolve public hostnames). kube-dns lives in the cluster Service range, so
-    # this is allowed explicitly even though that range is otherwise treated as internal.
-    - ports:
+    # DNS, scoped to the cluster DNS namespace (sandbox.network.dnsNamespace).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.sandbox.network.dnsNamespace | default "kube-system" }}
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
