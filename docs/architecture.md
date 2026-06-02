@@ -23,15 +23,21 @@ process with outbound network access (for the LLM API). The sandbox is isolated.
 
 ## Flow
 
-1. A Slack message arrives. The Slack channel sets `chat_id` = the **Slack user id**
-   (trusted, taken from channel context).
+1. A Slack message arrives. nanobot's Slack channel carries the **trusted Slack user id**
+   (`event.user`) and conversation type (`channel_type == "im"` for DMs) in the per-message
+   context metadata. Note `RequestContext.chat_id` is the **conversation** id (the DM channel for
+   a DM, the channel id for a channel message) — not the user id.
 2. nanobot sets the trusted per-message `RequestContext` on every `ContextAware` tool (the
    `corpbot` plugin's boxy tools) in that message's asyncio task, before the turn runs.
 3. When the model calls a boxy tool, the plugin opens a fresh boxy `/mcp` connection for that
-   call carrying two headers: `X-Session-Id: u-<sanitized-slack-user-id>` (the per-user key,
-   derived from the **trusted per-message `chat_id`** — never from tool arguments) and
+   call carrying two headers: `X-Session-Id: u-<sanitized-key>` (the routing key, derived from
+   **trusted identity** per the scope rules below — never from tool arguments) and
    `X-Sandbox-Id: <config id>` (the shared `Sandbox` config, a deploy-time value).
-4. boxy-router finds no session for that user yet → provisions one bound to the named config
+   - **DMs** key on the Slack user id (always per-user — a DM is 1:1).
+   - **Channels** follow `sandbox.sessionScope` (env `BOXY_SESSION_SCOPE`): `per-user` (default)
+     keys on the user id so every member is isolated even in a shared channel; `per-channel`
+     keys on the channel id so the whole channel shares one sandbox.
+4. boxy-router finds no session for that key yet → provisions one bound to the named config
    (the shared `Sandbox` CR) → `setupScript` restores `/workspace` from `s3://<bucket>/u-<user>/`.
    Later calls reuse the running session.
 5. Tool calls run in the jail. **Each exec refreshes the sliding 1h TTL.**
@@ -63,17 +69,19 @@ Slack          nanobot                         boxy-router            sandbox (n
 
 ## Identity & security model
 
-- **Routing key** is `u-<sanitized-slack-user-id>`, carried as the `X-Session-Id` header (the
-  per-user runtime key). The `X-Sandbox-Id` header carries the shared `Sandbox` **config** id —
-  a deploy-time value, never derived from the user.
-- **Derivation:** the Slack user id comes from the per-message **`RequestContext.chat_id`**
-  that nanobot trusts. The `corpbot` plugin reads it in `set_context` (called by nanobot per
-  message), stores the sanitized session id in a `contextvar`, and injects it on the
-  `X-Session-Id` header of every boxy MCP call. Each inbound message is its own asyncio task, so
-  the `contextvar` is concurrency-safe across users.
+- **Routing key** is `u-<sanitized-key>`, carried as the `X-Session-Id` header. **DMs** key on the
+  Slack user id (always per-user). **Channels** follow `sandbox.sessionScope` (`BOXY_SESSION_SCOPE`):
+  `per-user` (default) keys on the user id, `per-channel` keys on the channel id. The `X-Sandbox-Id`
+  header carries the shared `Sandbox` **config** id — a deploy-time value, never derived from the user.
+- **Derivation:** the plugin's `set_context` (called by nanobot per message) pulls the trusted
+  user id and conversation type from `RequestContext.metadata["slack"]` (`event.user`,
+  `channel_type`); `RequestContext.chat_id` is the conversation id used for `per-channel` scope.
+  It resolves the key per the scope rules, stores the sanitized session id in a `contextvar`, and
+  injects it on the `X-Session-Id` header of every boxy MCP call. Each inbound message is its own
+  asyncio task, so the `contextvar` is concurrency-safe across users.
 - **It must never come from the LLM or from tool arguments.** Letting the model choose the
   session id would be a confused-deputy vulnerability (one user reading another's workspace).
-- **Sanitization** (`sanitize_session_id(chat_id)`): lowercase, keep only `[a-z0-9-]`, prefix
+- **Sanitization** (`sanitize_session_id`): lowercase, keep only `[a-z0-9-]`, prefix
   `u-`, cap at 63 chars (boxy uses `X-Session-Id` verbatim as the k8s RFC1123 label-backed
   Session name). Slack ids are uppercase, so lowercasing matters.
 - **Path confinement:** boxy's file tools confine every path to `/workspace` and reject `..`,
