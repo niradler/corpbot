@@ -3,8 +3,8 @@
 One `helm install` brings up the whole corpbot platform:
 
 - **nanobot** — the agent brain + Slack ingress, running the **corpbot plugin** (the boxy MCP
-  client; injects per-user `X-Sandbox-Id`). Built-in tools (`exec`/`web`/`file`) are disabled,
-  so the model can **only** act through boxy.
+  client; injects per-user `X-Session-Id` + the shared `X-Sandbox-Id` config). Built-in tools
+  (`exec`/`web`/`file`) are disabled, so the model can **only** act through boxy.
 - **boxy** — the per-user nsjail sandbox runtime, consumed as a **subchart** from its published
   chart `oci://ghcr.io/niradler/charts/boxy` (pinned). Default sandbox is **off** (fail-closed);
   nanobot authenticates with a **projected ServiceAccount token** that boxy validates via
@@ -97,8 +97,9 @@ only for local dev / e2e.
   (pod- and container-level). Writable `emptyDir`s mount `~/.nanobot` (home/workspace) and `/tmp`.
 - **NetworkPolicy**: default-deny; egress allowed only to DNS, the boxy-router port, and HTTPS
   (LLM API + Slack socket mode). No app ingress (Slack is outbound socket mode).
-- **boxy default sandbox OFF**: a tool call with no `X-Sandbox-Id` returns a tool-error instead
-  of routing to a shared sandbox (defense-in-depth alongside the plugin's fail-closed routing).
+- **boxy default sandbox OFF**: a tool call with no routing headers returns a tool-error instead
+  of routing to a shared sandbox (defense-in-depth alongside the plugin's fail-closed routing,
+  which refuses any call lacking the trusted per-user `X-Session-Id`).
 - **SA-token auth + least-privilege RBAC**: nanobot's SA gets only `boxy.dev`
   `sandboxes`/`sessions` `[get,list,create,update]` in boxy's namespace.
 - **mTLS** between boxy router/operator and controller stays **on** (`boxy.mtls.disabled: false`).

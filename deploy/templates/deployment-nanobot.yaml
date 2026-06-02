@@ -61,11 +61,14 @@ spec:
             - name: HOME
               value: /home/nanobot
             # --- LLM key + Slack tokens (from the secret) ---
+            {{- if .Values.nanobot.provider.apiKeyEnv }}
+            # Skipped for keyless local providers (provider.apiKeyEnv: "") — ollama/lm_studio/vllm.
             - name: {{ .Values.nanobot.provider.apiKeyEnv }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName }}
                   key: {{ .Values.secrets.keys.llmApiKey }}
+            {{- end }}
             - name: {{ .Values.secrets.keys.slackBotToken }}
               valueFrom:
                 secretKeyRef:
@@ -81,6 +84,11 @@ spec:
               value: {{ $mcpUrl | quote }}
             - name: BOXY_MCP_TIMEOUT_SECONDS
               value: {{ $bc.timeoutSeconds | quote }}
+            # The shared sandbox CONFIG id (X-Sandbox-Id). Per-user isolation comes from the
+            # X-Session-Id the plugin derives from the Slack id; this selects the Sandbox config CR
+            # (templates/sandbox.yaml) every user's sandbox is built from.
+            - name: BOXY_SANDBOX_CONFIG_ID
+              value: {{ .Values.sandbox.sandboxId | quote }}
             {{- if eq $bc.auth "projected" }}
             # Rotation-safe: plugin re-reads this file on each call (kubelet rotates it on disk).
             - name: BOXY_ROUTER_TOKEN_FILE

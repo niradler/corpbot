@@ -34,13 +34,17 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.boxy.router.servicePort | default 8080 }}
-    # Outbound to the LLM API and Slack (socket mode websocket). HTTPS.
+    # Outbound to the LLM API and Slack (socket mode websocket). Default port 443 (HTTPS);
+    # add self-hosted/local LLM ports via networkPolicy.llmEgressPorts (e.g. 11434 for Ollama).
+    {{- $ports := .Values.networkPolicy.llmEgressPorts | default (list 443) }}
     {{- range .Values.networkPolicy.llmEgressCidrs }}
     - to:
         - ipBlock:
             cidr: {{ . | quote }}
       ports:
+        {{- range $ports }}
         - protocol: TCP
-          port: 443
+          port: {{ . }}
+        {{- end }}
     {{- end }}
 {{- end }}

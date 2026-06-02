@@ -1,4 +1,9 @@
 {{- $boxyNs := include "corpbot.boxyNamespace" . -}}
+{{/* Build the provider config object: include apiKey only when an env var is named (first-party
+     providers), and apiBase only when set (OpenAI-compatible / local providers like ollama). */}}
+{{- $prov := dict -}}
+{{- with .Values.nanobot.provider.apiKeyEnv }}{{- $_ := set $prov "apiKey" (printf "${%s}" .) -}}{{- end -}}
+{{- with .Values.nanobot.provider.apiBase }}{{- $_ := set $prov "apiBase" . -}}{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -26,9 +31,7 @@ data:
         }
       },
       "providers": {
-        {{ .Values.nanobot.provider.name | quote }}: {
-          "apiKey": "${{"{"}}{{ .Values.nanobot.provider.apiKeyEnv }}{{"}"}}"
-        }
+        {{ .Values.nanobot.provider.name | quote }}: {{ $prov | toJson }}
       },
       "tools": {
         "exec": { "enable": false },

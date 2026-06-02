@@ -1,6 +1,9 @@
 # Scratch clone of the HKUDS/nanobot fork used during development (not vendored here).
 _explore/
 
+# Local agent/session scaffolding (plans, working notes, skills) — not part of the repo.
+.claude/
+
 # Python
 .venv/
 .venv*/
