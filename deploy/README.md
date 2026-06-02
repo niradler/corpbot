@@ -127,17 +127,42 @@ per-message identity (the Slack user id / channel id), never from the model or t
 - **Secrets** never live in `values.yaml`; they come from a Secret via `secretKeyRef`, and the
   boxy bearer is a rotating projected token, not a static value.
 
+## Production configuration
+
+The platform is functionally complete (per-user provisioning, isolation, fail-closed, mTLS, RBAC —
+all exercised end-to-end). Going to production is **configuration**, not code. The knobs:
+
+- **LLM provider** — set `nanobot.provider.{name,model}`. For a hosted provider (e.g. `anthropic`),
+  set `apiKeyEnv: ANTHROPIC_API_KEY` and put the key in the secret (`secrets.keys.llmApiKey`); leave
+  `apiBase` empty. For a keyless local backend (`ollama`/`vllm`/`lm_studio`), set `apiKeyEnv: ""` and
+  `apiBase` (Ollama needs the `/v1` suffix). Add the provider's port to `networkPolicy.llmEgressPorts`
+  (`443` for hosted; e.g. `11434` for Ollama).
+- **Slack allow-list** — set `nanobot.slack.allowFrom` to your approved Slack user ids. Empty = a
+  pairing-code flow for unapproved senders.
+- **Projected-token audience** — `nanobot.boxyClient.tokenAudience` defaults to the FQDN
+  `https://kubernetes.default.svc.cluster.local` (the API server's default `--api-audiences` on
+  kubeadm/kind/most managed clusters). Override only if your cluster's `--api-audiences` differs.
+- **Sandbox memory** — `sandbox.vm.memoryMb` (default `512`) requires cgroup-v2 memory delegation to
+  the boxy controller pod, which real clusters provide. On `kind` (which does not delegate the memory
+  controller) set `--set sandbox.vm.memoryMb=null`.
+- **Workspace persistence** — per-user `/workspace` is ephemeral by default. To persist it across
+  sandbox restarts, configure boxy's sandbox `setupScript`/`teardownScript` to sync `/workspace` to
+  object storage (e.g. S3) — see the [boxy](https://github.com/niradler/boxy) docs for the script
+  fields. No corpbot change is needed; it is a boxy `Sandbox` config option.
+
 ## Building the nanobot image
 
-The image bundles stock `nanobot-ai` **and** the corpbot plugin. Build from the **repo root** so
-the context includes `pyproject.toml` + `src/`:
+The chart defaults to the **published** image `ghcr.io/niradler/corpbot` (tag = chart appVersion),
+which bundles stock `nanobot-ai` **and** the corpbot plugin — a stock install needs no build. To run
+your own (e.g. a patched plugin), build from the **repo root** so the context includes
+`pyproject.toml` + `src/`:
 
 ```bash
-docker build -f deploy/docker/Dockerfile.nanobot -t ghcr.io/niradler/corpbot-nanobot:0.1.0 .
-docker push ghcr.io/niradler/corpbot-nanobot:0.1.0   # TODO: push to a registry you control
+docker build -f deploy/docker/Dockerfile.nanobot -t ghcr.io/niradler/corpbot:0.1.2 .
+docker push ghcr.io/niradler/corpbot:0.1.2
 ```
 
-Then set `nanobot.image.repository` / `nanobot.image.tag` in `values.yaml` (or via `--set`).
+Then point `nanobot.image.repository` / `nanobot.image.tag` at your image (or via `--set`).
 The Dockerfile installs the plugin via `pip install .` of this repo; swap to
 `pip install corpbot==<version>` once you pin a published release.
 
